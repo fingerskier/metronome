@@ -4,7 +4,7 @@ import { useLocalStorage } from 'react-confection'
 import './App.css'
 
 
-function App() {
+export default function App() {
   const [bpm, setBpm] = useLocalStorage('bpm', 120)
   
   const [running, setRunning] = useState(false)
@@ -29,5 +29,3 @@ function App() {
     </button>
   </>
 }
-
-export default App
