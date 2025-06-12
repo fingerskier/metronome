@@ -1,26 +1,24 @@
 import { useEffect, useState, useRef } from 'react'
 
 const DOT = {
-  BLACK: '⚫',
+  none: '⚫',
   BROWN: '🟤',
-  GREEN: '🟢',
+  accent: '🟢',
   ORANGE: '🟠',
   PURPLE: '🟣',
-  accent: '🔴',
-  offbeat: '⭕',
-  WHITE: '⚪',
+  // accent: '🔴',
+  // offbeat: '⭕',
+  offbeat: '⚪',
   YELLOW: '🟡',
 }
 
 
 export default function Blip({show=false, accent=false}) {
-  const [isVisible, setIsVisible] = useState(false)
   const frameCountRef = useRef(0)
   const animationRef = useRef<number>(0)
 
   useEffect(() => {
     if (show) {
-      setIsVisible(true)
       frameCountRef.current = 0
       
       const animate = () => {
@@ -28,7 +26,6 @@ export default function Blip({show=false, accent=false}) {
         
         // Turn off after 6 animation frames
         if (frameCountRef.current >= 6) {
-          setIsVisible(false)
           if (animationRef.current) {
             cancelAnimationFrame(animationRef.current)
           }
@@ -47,5 +44,7 @@ export default function Blip({show=false, accent=false}) {
     }
   }, [show])
   
-  return <div>{isVisible ? DOT[accent ? 'accent' : 'offbeat'] : ''}</div>
+  return <div style={{fontSize: '2rem'}}>
+    {DOT[show ? accent ? 'accent' : 'offbeat' : 'none']}
+  </div>
 }

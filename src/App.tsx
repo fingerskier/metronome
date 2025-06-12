@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocalStorage } from 'react-use'
-import useTimer from './hook/useTimer'
-import useBeep from './hook/useBeep'
-import useVibrate from './hook/useVibrate'
+import useTimer from '@/hook/useTimer'
+import useBeep from '@/hook/useBeep'
+import useVibrate from '@/hook/useVibrate'
+import Blip from '@/com/Blip'
 
 import './App.css'
+import logo from './img/logo96.png'
 
 
 export default function App() {
@@ -12,19 +14,28 @@ export default function App() {
   const [pattern, setPattern] = useLocalStorage('pattern', 4)
   const [sound, setSound] = useLocalStorage('sound', true)
   const [vibe, setVibe] = useLocalStorage('vibe', false)
-
+  
+  const [accent, setAccent] = useState(false)
   const [running, setRunning] = useState(false)
+  const [tick, setTick] = useState(false)
 
   const { beep, resumeAudio } = useBeep()
   const vibrate = useVibrate()
   const beatRef = useRef(0)
-  const { start, stop, setDuration } = useTimer(() => {
+  const { start, stop, setDuration } = useTimer((delta) => {
+    setTick(true)
+
     beatRef.current = (beatRef.current + 1) % (pattern ?? 4)
-    const accent = beatRef.current === 0
+    const accented = beatRef.current === 0
     if (sound) {
-      beep(accent)
+      beep(accented)
     }
-    if (vibe) vibrate(accent)
+    if (vibe) vibrate(accented)
+    setAccent(accented)
+    
+    setTimeout(() => {
+      setTick(false)
+    }, 100)
   }, 60000 / (bpm ?? 120))
 
   
@@ -53,7 +64,9 @@ export default function App() {
 
 
   return <>
-    <h1>Metronome</h1>
+    <h1>
+      <img src={logo} alt="Metronome" className="logo" />
+    </h1>
 
     <div className="row">
       <label htmlFor="bpm"> BPM: </label>
@@ -66,9 +79,9 @@ export default function App() {
         max={300}
         step={1}
       />
-    </div>
 
-    <div className="row">
+      <Blip show={tick} accent={accent} />
+
       <label htmlFor="pattern"> Pattern: </label>
     
       <select
@@ -84,26 +97,21 @@ export default function App() {
     </div>
 
     <div className="row">
-      <label htmlFor="sound"> Sound </label>
-    
-      <input
-        type="checkbox"
-        id="sound"
-        checked={sound}
-        onChange={(e) => setSound(e.target.checked)}
-      />
+      <label htmlFor="sound"> 
+        Sound
+      </label>
+      <button id="sound" onClick={() => setSound(!sound)}>
+        {sound ? '🔊On' : '🔇Off'}
+      </button>
     </div>
 
     <div className="row">
-      <label htmlFor="vibe"> Vibration </label>
-
-
-      <input
-        type="checkbox"
-        id="vibe"
-        checked={vibe}
-        onChange={(e) => setVibe(e.target.checked)}
-      />
+      <label htmlFor="vibe"> 
+        Vibration
+      </label>
+      <button id="vibe" onClick={() => setVibe(!vibe)}>
+        {vibe ? '📳On' : '📴Off'}
+      </button>
     </div>
 
     <button onClick={() => setRunning(!running)}>

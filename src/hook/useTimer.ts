@@ -8,8 +8,8 @@ export default function useTimer(
   callback: (delta: number) => void,
   initialDuration: number,
 ) {
-  const [running, setRunning] = useState(false)
   const [duration, setDuration] = useState(initialDuration)
+  const [running, setRunning] = useState(false)
 
 
   const callbackRef = useRef(callback)
@@ -18,13 +18,13 @@ export default function useTimer(
 
   callbackRef.current = callback
 
-  const tick = useCallback(() => {
+  const run = useCallback(() => {
     const now = Date.now()
     
     if (prevRef.current === null) {
       // First tick - just set the reference time
       prevRef.current = now
-      frameRef.current = requestAnimationFrame(tick)
+      frameRef.current = requestAnimationFrame(run)
       return
     }
     
@@ -37,8 +37,9 @@ export default function useTimer(
       callbackRef.current(delta)
     }
 
-    frameRef.current = requestAnimationFrame(tick)
+    frameRef.current = requestAnimationFrame(run)
   }, [duration])
+
 
   useEffect(() => {
     if (!running) {
@@ -46,19 +47,22 @@ export default function useTimer(
     }
 
     prevRef.current = null // Reset on start
-    frameRef.current = requestAnimationFrame(tick)
+    frameRef.current = requestAnimationFrame(run)
     return () => {
       if (frameRef.current) cancelAnimationFrame(frameRef.current)
     }
-  }, [running, tick])
+  }, [running, run])
+
 
   const start = useCallback(() => {
     setRunning(true)
   }, [])
   
+
   const stop = useCallback(() => {
     setRunning(false)
   }, [])
+
 
   return { running, start, stop, duration, setDuration }
 }
