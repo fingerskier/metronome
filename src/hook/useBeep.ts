@@ -5,8 +5,8 @@ import { useCallback, useEffect, useRef } from 'react'
  * beep with a higher frequency is produced.
  */
 export default function useBeep() {
-  const contextRef = useRef<AudioContext>()
-  const gainRef = useRef<GainNode>()
+  const contextRef = useRef<AudioContext | null>(null)
+  const gainRef = useRef<GainNode | null>(null)
 
   useEffect(() => {
     const ctor =
@@ -23,10 +23,19 @@ export default function useBeep() {
     }
   }, [])
 
-  return useCallback((accent = false) => {
+  const resumeAudio = useCallback(async () => {
+    const ctx = contextRef.current
+    if (ctx && ctx.state === 'suspended') {
+      await ctx.resume()
+    }
+  }, [])
+
+  const beep = useCallback((accent = false) => {
     const ctx = contextRef.current
     const gain = gainRef.current
-    if (!ctx || !gain) return
+    if (!ctx || !gain) {
+      return
+    }
     const osc = ctx.createOscillator()
     const g = ctx.createGain()
     osc.type = 'sine'
@@ -38,4 +47,6 @@ export default function useBeep() {
     g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.1)
     osc.stop(ctx.currentTime + 0.1)
   }, [])
+
+  return { beep, resumeAudio }
 }

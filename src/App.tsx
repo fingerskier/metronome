@@ -15,70 +15,96 @@ export default function App() {
 
   const [running, setRunning] = useState(false)
 
-  const beep = useBeep()
+  const { beep, resumeAudio } = useBeep()
   const vibrate = useVibrate()
   const beatRef = useRef(0)
   const { start, stop, setDuration } = useTimer(() => {
-    beatRef.current = (beatRef.current + 1) % pattern
+    beatRef.current = (beatRef.current + 1) % (pattern ?? 4)
     const accent = beatRef.current === 0
-    if (sound) beep(accent)
+    if (sound) {
+      beep(accent)
+    }
     if (vibe) vibrate(accent)
-  }, 60000 / bpm)
+  }, 60000 / (bpm ?? 120))
 
+  
   useEffect(() => {
-    setDuration(60000 / bpm)
+    const newDuration = 60000 / (bpm ?? 120)
+    setDuration(newDuration)
   }, [bpm, setDuration])
 
+
   useEffect(() => {
-    if (running) start()
-    else stop()
-  }, [running, start, stop])
+    if (running) {
+      const startAudio = async () => {
+        try {
+          await resumeAudio() // Wait for audio context to resume
+          start()
+        } catch (error) {
+          console.error('Failed to resume audio:', error)
+          start() // Start anyway even if audio fails
+        }
+      }
+      startAudio()
+    } else {
+      stop()
+    }
+  }, [running, start, stop, resumeAudio])
 
 
   return <>
     <h1>Metronome</h1>
 
-    <label>
-      BPM:
+    <div className="row">
+      <label htmlFor="bpm"> BPM: </label>
+
       <input type="number" 
+        id="bpm"
         value={bpm} 
         onChange={(e) => setBpm(Number(e.target.value))} 
         min={1}
         max={300}
         step={1}
       />
-    </label>
+    </div>
 
-    <label>
-      Pattern:
+    <div className="row">
+      <label htmlFor="pattern"> Pattern: </label>
+    
       <select
+        id="pattern"
         value={pattern}
         onChange={(e) => setPattern(Number(e.target.value))}
-      >
+        >
         <option value={2}>2/4</option>
         <option value={3}>3/4</option>
         <option value={4}>4/4</option>
         <option value={6}>6/8</option>
       </select>
-    </label>
+    </div>
 
-    <label>
+    <div className="row">
+      <label htmlFor="sound"> Sound </label>
+    
       <input
         type="checkbox"
+        id="sound"
         checked={sound}
         onChange={(e) => setSound(e.target.checked)}
       />
-      Sound
-    </label>
+    </div>
 
-    <label>
+    <div className="row">
+      <label htmlFor="vibe"> Vibration </label>
+
+
       <input
         type="checkbox"
+        id="vibe"
         checked={vibe}
         onChange={(e) => setVibe(e.target.checked)}
       />
-      Vibration
-    </label>
+    </div>
 
     <button onClick={() => setRunning(!running)}>
       {running ? 'Stop' : 'Start'}
