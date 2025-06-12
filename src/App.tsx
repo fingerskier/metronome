@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useLocalStorage } from 'react-confection'
+import { useLocalStorage } from 'react-use'
 
 import './App.css'
 
