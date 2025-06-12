@@ -22,7 +22,7 @@ export default function App() {
   const { beep, resumeAudio } = useBeep()
   const vibrate = useVibrate()
   const beatRef = useRef(0)
-  const { start, stop, setDuration } = useTimer((delta) => {
+  const { start, stop, setDuration } = useTimer(() => {
     setTick(true)
 
     beatRef.current = (beatRef.current + 1) % (pattern ?? 4)
