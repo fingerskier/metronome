@@ -13,32 +13,15 @@ export default function useTimer(
 
 
   const callbackRef = useRef(callback)
-  const frameRef = useRef<number | null>(null)
   const prevRef = useRef<number | null>(null)
 
-  callbackRef.current = callback
 
-  const run = useCallback(() => {
-    const now = Date.now()
-    
-    if (prevRef.current === null) {
-      // First tick - just set the reference time
-      prevRef.current = now
-      frameRef.current = requestAnimationFrame(run)
-      return
-    }
-    
-    const prev = prevRef.current
-    const delta = now - prev
-
-
-    if (delta >= duration) {
-      prevRef.current = now
-      callbackRef.current(delta)
-    }
-
-    frameRef.current = requestAnimationFrame(run)
-  }, [duration])
+  // Track the newest callback so a re-render of the caller does not tear down
+  // and restart the animation loop. This has to happen in an effect rather
+  // than straight through render -- refs are not render-time state.
+  useEffect(() => {
+    callbackRef.current = callback
+  }, [callback])
 
 
   useEffect(() => {
@@ -46,18 +29,40 @@ export default function useTimer(
       return
     }
 
+    let frame = 0
     prevRef.current = null // Reset on start
-    frameRef.current = requestAnimationFrame(run)
-    return () => {
-      if (frameRef.current) cancelAnimationFrame(frameRef.current)
+
+    // Declared inside the effect so it can schedule itself; a useCallback
+    // cannot reference its own result before it is assigned.
+    const run = () => {
+      const now = Date.now()
+
+      if (prevRef.current === null) {
+        // First tick - just set the reference time
+        prevRef.current = now
+      } else {
+        const delta = now - prevRef.current
+
+        if (delta >= duration) {
+          prevRef.current = now
+          callbackRef.current(delta)
+        }
+      }
+
+      frame = requestAnimationFrame(run)
     }
-  }, [running, run])
+
+    frame = requestAnimationFrame(run)
+    return () => {
+      cancelAnimationFrame(frame)
+    }
+  }, [running, duration])
 
 
   const start = useCallback(() => {
     setRunning(true)
   }, [])
-  
+
 
   const stop = useCallback(() => {
     setRunning(false)
