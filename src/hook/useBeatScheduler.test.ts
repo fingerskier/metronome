@@ -74,6 +74,34 @@ describe('useBeatScheduler', () => {
     }
   })
 
+  it('falls back to a safe tempo instead of hanging when bpm is negative', async () => {
+    // `||` guards truthiness, not positivity. A negative bpm is truthy, so an
+    // unguarded fallback computes secondsPerBeat = 60 / -5 = -12: the
+    // while-loop in scheduleAhead then walks nextNoteTime AWAY from its
+    // horizon forever. That loop runs synchronously (once during mount's
+    // begin(), and again on every worker tick), so a regression here hangs
+    // this test until the per-test timeout fires rather than failing cleanly.
+    await mount({ bpm: -5 })
+    const ctx = latestAudioContext()
+
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+
+    const times = scheduledTimes()
+    expect(times.length).toBeGreaterThan(4)
+
+    // A non-positive bpm must fall back to the same default tempo used
+    // elsewhere in this file (120bpm), not to a negative or zero spacing.
+    const expected = 60 / 120
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i] - times[i - 1]).toBeCloseTo(expected, 9)
+    }
+  })
+
   it('accents the first beat of a run and every pattern-th beat after', async () => {
     await mount({ bpm: 240, pattern: 4 })
     const ctx = latestAudioContext()
@@ -122,6 +150,44 @@ describe('useBeatScheduler', () => {
     }
 
     expect(ctx.oscillators).toHaveLength(0)
+  })
+
+  it('keeps the beat phase advancing while muted, so unmuting lands mid-pattern', async () => {
+    // Muting must silence the click without pausing the beat: phase keeps
+    // advancing so that unmuting lands on the correct beat and accent,
+    // rather than resuming (or restarting) on a downbeat.
+    const { rerender, onBeat } = await mount({
+      bpm: 240,
+      pattern: 4,
+      sound: false,
+    })
+    const ctx = latestAudioContext()
+
+    // Drive just over three full pattern cycles (13 beats total, including
+    // the one scheduled synchronously at mount) while muted.
+    for (let i = 1; i <= 12; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+    expect(ctx.oscillators).toHaveLength(0) // still silent throughout
+
+    rerender({ bpm: 240, pattern: 4, sound: true, running: true, onBeat })
+
+    for (let i = 13; i <= 16; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+
+    const freqs = ctx.oscillators.map((osc) => osc.frequency.value)
+    // The muted phase above ends mid-pattern, one beat past a downbeat. If
+    // muting had paused (or reset) the phase, the first audible beat here
+    // would be an accented downbeat (880Hz) instead of the offbeat the
+    // continued phase predicts.
+    expect(freqs).toEqual([440, 440, 440, 880])
   })
 
   it('picks up a tempo change on the next scheduled beat', async () => {

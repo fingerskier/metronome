@@ -5,11 +5,6 @@ import useBeep from '@/hook/useBeep'
 const TICK_MS = 25
 /** How far ahead to commit beats while the tab is visible, in seconds. */
 const LOOKAHEAD_VISIBLE = 0.1
-/** How far ahead while hidden -- must outlast throttled timers. Consumed by
- *  the visibility-listener task that widens `lookaheadRef` when the tab is
- *  backgrounded; kept here (and exported) so `noUnusedLocals` doesn't flag it
- *  before that wiring lands. */
-export const LOOKAHEAD_HIDDEN = 2
 /** The first beat lands this far in the future; scheduling at exactly
  *  currentTime plays immediately and loses envelope precision. */
 const START_OFFSET = 0.05
@@ -57,7 +52,10 @@ export default function useBeatScheduler({
 
     const scheduleAhead = () => {
       const params = paramsRef.current
-      const secondsPerBeat = 60 / (params.bpm || 120)
+      // Guard on positivity, not truthiness: a negative bpm is truthy, and a
+      // negative secondsPerBeat makes the while-loop below walk away from its
+      // horizon forever, hanging the tab on the main thread.
+      const secondsPerBeat = 60 / (params.bpm > 0 ? params.bpm : 120)
       const horizon = audioTime() + lookaheadRef.current
 
       while (nextNoteTime < horizon) {
@@ -70,7 +68,10 @@ export default function useBeatScheduler({
         }
 
         nextNoteTime += secondsPerBeat
-        beat = (beat + 1) % (params.pattern || 4)
+        // Same reasoning as the bpm guard above: a negative pattern is
+        // truthy, and while it can't hang the loop, it corrupts the accent
+        // cycle through JavaScript's signed modulo.
+        beat = (beat + 1) % (params.pattern > 0 ? params.pattern : 4)
       }
     }
 
