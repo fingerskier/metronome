@@ -355,4 +355,85 @@ describe('useBeatScheduler', () => {
       expect(osc.disconnect).toHaveBeenCalled()
     })
   })
+
+  it('reports a beat to the UI once its audio time has arrived', async () => {
+    const { onBeat } = await mount({ bpm: 120, pattern: 4 })
+    const ctx = latestAudioContext()
+
+    act(() => {
+      ctx.currentTime = 0.2
+      latestWorker().tick()
+      vi.advanceTimersByTime(50)
+    })
+
+    expect(onBeat).toHaveBeenCalled()
+    const [beat, accent] = onBeat.mock.calls[0]
+    expect(beat).toBe(0)
+    expect(accent).toBe(true)
+  })
+
+  it('does not report a beat before its audio time', async () => {
+    const { onBeat } = await mount({ bpm: 60 })
+
+    // currentTime stays at 0; the first beat is scheduled at START_OFFSET.
+    act(() => {
+      latestWorker().tick()
+      vi.advanceTimersByTime(50)
+    })
+
+    expect(onBeat).not.toHaveBeenCalled()
+  })
+
+  it('releases notes that have finished sounding', async () => {
+    // Guards against the committed-notes array growing for the whole run.
+    // The array is private, but pruning is observable: a note already
+    // finished must NOT be re-cancelled on stop, while a pending one must be.
+    const { rerender, onBeat } = await mount({ bpm: 240, pattern: 4 })
+    const ctx = latestAudioContext()
+
+    act(() => {
+      ctx.currentTime = 0.5
+      latestWorker().tick()
+    })
+
+    const early = ctx.oscillators[0]
+    expect(early).toBeDefined()
+
+    // Advance past the first note's end and run a frame so the drain prunes.
+    act(() => {
+      ctx.currentTime = 5
+      vi.advanceTimersByTime(20)
+    })
+
+    // Commit a fresh note that is still in the future, then stop.
+    act(() => {
+      latestWorker().tick()
+    })
+    const pending = ctx.oscillators[ctx.oscillators.length - 1]
+
+    rerender({ bpm: 240, pattern: 4, sound: true, running: false, onBeat })
+
+    expect(early.stop).not.toHaveBeenCalledWith()
+    expect(pending.stop).toHaveBeenCalledWith()
+  })
+
+  it('drops stale beats instead of firing a burst after a hidden stretch', async () => {
+    const { onBeat } = await mount({ bpm: 240, pattern: 4 })
+    const ctx = latestAudioContext()
+
+    // Commit a long run of beats, as a hidden tab with a wide lookahead would.
+    act(() => {
+      ctx.currentTime = 0.1
+      latestWorker().tick()
+    })
+
+    // Jump the audio clock far past all of them, then run a single frame.
+    act(() => {
+      ctx.currentTime = 30
+      vi.advanceTimersByTime(20)
+    })
+
+    // 30s at 240bpm would be 120 beats if it tried to replay them all.
+    expect(onBeat.mock.calls.length).toBeLessThanOrEqual(2)
+  })
 })

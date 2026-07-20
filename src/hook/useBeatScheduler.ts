@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import useBeep from '@/hook/useBeep'
+import useBeep, { NOTE_LENGTH } from '@/hook/useBeep'
 
 /** How often the worker wakes us to top up the schedule, in ms. */
 const TICK_MS = 25
@@ -13,6 +13,8 @@ const MAX_BPM = 1000
 /** Hard backstop making the scheduling loop provably terminating for ANY
  *  input. At the widest lookahead and MAX_BPM this is never reached. */
 const MAX_BEATS_PER_PASS = 256
+
+type BeatEvent = { time: number; beat: number; accent: boolean }
 
 export type BeatSchedulerOptions = {
   bpm: number
@@ -50,9 +52,11 @@ export default function useBeatScheduler({
     if (!running) return
 
     let cancelled = false
+    let frame = 0
     let worker: Worker | null = null
 
-    const scheduled: OscillatorNode[] = []
+    const queue: BeatEvent[] = []
+    const scheduled: { osc: OscillatorNode; endsAt: number }[] = []
     let nextNoteTime = 0
     let beat = 0
 
@@ -88,8 +92,10 @@ export default function useBeatScheduler({
         // vibration keep working.
         if (params.sound) {
           const osc = scheduleBeep(nextNoteTime, accent)
-          if (osc) scheduled.push(osc)
+          if (osc) scheduled.push({ osc, endsAt: nextNoteTime + NOTE_LENGTH })
         }
+
+        queue.push({ time: nextNoteTime, beat, accent })
 
         nextNoteTime += secondsPerBeat
         // Same reasoning as the bpm guard above: a negative pattern is
@@ -98,6 +104,30 @@ export default function useBeatScheduler({
         beat = (beat + 1) % pattern
         committed++
       }
+    }
+
+    // Plain local function, not a useCallback: it schedules itself, and a
+    // useCallback cannot reference its own result (react-hooks/immutability).
+    const drain = () => {
+      const now = audioTime()
+      let due: BeatEvent | undefined
+
+      // Take only the most recent due beat. Returning from a hidden tab leaves
+      // a pile of elapsed beats queued, and firing them all would machine-gun
+      // the UI instead of resyncing.
+      while (queue.length > 0 && queue[0].time <= now) {
+        due = queue.shift()
+      }
+
+      if (due) paramsRef.current.onBeat(due.beat, due.accent)
+
+      // Release notes that have finished sounding. Without this the array
+      // grows for the whole run and nothing can be collected until Stop.
+      while (scheduled.length > 0 && scheduled[0].endsAt <= now) {
+        scheduled.shift()
+      }
+
+      frame = requestAnimationFrame(drain)
     }
 
     const begin = async () => {
@@ -121,12 +151,14 @@ export default function useBeatScheduler({
       worker.postMessage({ type: 'start', interval: TICK_MS })
 
       scheduleAhead()
+      frame = requestAnimationFrame(drain)
     }
 
     void begin()
 
     return () => {
       cancelled = true
+      if (frame) cancelAnimationFrame(frame)
 
       if (worker) {
         worker.postMessage({ type: 'stop' })
@@ -135,7 +167,7 @@ export default function useBeatScheduler({
 
       // Beats are committed ahead of now, so without this they keep sounding
       // after the user hit Stop.
-      for (const osc of scheduled) {
+      for (const { osc } of scheduled) {
         try {
           osc.stop()
         } catch {
@@ -144,6 +176,7 @@ export default function useBeatScheduler({
         osc.disconnect()
       }
       scheduled.length = 0
+      queue.length = 0
     }
   }, [running, audioTime, scheduleBeep, resumeAudio])
 

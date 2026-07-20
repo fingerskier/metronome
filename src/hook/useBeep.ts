@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 
 /** How long a single click rings, in seconds. */
-const NOTE_LENGTH = 0.1
+export const NOTE_LENGTH = 0.1
 
 /**
  * Tone synthesis for the metronome click. Knows nothing about tempo or beats --
