@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import useBeatScheduler from './useBeatScheduler'
 import { latestAudioContext } from '../test/audioStub'
 import { latestWorker } from '../test/workerStub'
+import {
+  installVibrateStub,
+  issuedPatterns,
+  removeVibrateStub,
+} from '../test/vibrateStub'
+import { MAX_ENTRY_MS, MAX_VIBE_ENTRIES } from '../lib/vibrationPattern'
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -24,6 +30,7 @@ async function mount(overrides: Partial<Options> = {}) {
     bpm: 120,
     pattern: 4,
     sound: true,
+    vibe: false,
     running: true,
     onBeat,
     ...overrides,
@@ -259,7 +266,7 @@ describe('useBeatScheduler', () => {
     }
     expect(ctx.oscillators).toHaveLength(0) // still silent throughout
 
-    rerender({ bpm: 240, pattern: 4, sound: true, running: true, onBeat })
+    rerender({ bpm: 240, pattern: 4, sound: true, vibe: false, running: true, onBeat })
 
     for (let i = 13; i <= 16; i++) {
       act(() => {
@@ -286,7 +293,7 @@ describe('useBeatScheduler', () => {
     })
     const before = scheduledTimes().length
 
-    rerender({ bpm: 240, pattern: 4, sound: true, running: true, onBeat })
+    rerender({ bpm: 240, pattern: 4, sound: true, vibe: false, running: true, onBeat })
 
     act(() => {
       ctx.currentTime = 2
@@ -309,7 +316,7 @@ describe('useBeatScheduler', () => {
     const { rerender, onBeat } = await mount()
     const worker = latestWorker()
 
-    rerender({ bpm: 120, pattern: 4, sound: true, running: false, onBeat })
+    rerender({ bpm: 120, pattern: 4, sound: true, vibe: false, running: false, onBeat })
 
     expect(worker.posted).toContainEqual({ type: 'stop' })
     expect(worker.terminate).toHaveBeenCalled()
@@ -324,10 +331,10 @@ describe('useBeatScheduler', () => {
       latestWorker().tick()
     })
 
-    rerender({ bpm: 240, pattern: 4, sound: true, running: false, onBeat })
+    rerender({ bpm: 240, pattern: 4, sound: true, vibe: false, running: false, onBeat })
 
     const beforeRestart = ctx.oscillators.length
-    rerender({ bpm: 240, pattern: 4, sound: true, running: true, onBeat })
+    rerender({ bpm: 240, pattern: 4, sound: true, vibe: false, running: true, onBeat })
     await act(async () => {})
 
     const firstAfterRestart = ctx.oscillators[beforeRestart]
@@ -346,7 +353,7 @@ describe('useBeatScheduler', () => {
     const committed = ctx.oscillators.length
     expect(committed).toBeGreaterThan(0)
 
-    rerender({ bpm: 60, pattern: 4, sound: true, running: false, onBeat })
+    rerender({ bpm: 60, pattern: 4, sound: true, vibe: false, running: false, onBeat })
 
     // Every note the scheduler committed to must be actively cancelled --
     // otherwise it still sounds after Stop.
@@ -411,7 +418,7 @@ describe('useBeatScheduler', () => {
     })
     const pending = ctx.oscillators[ctx.oscillators.length - 1]
 
-    rerender({ bpm: 240, pattern: 4, sound: true, running: false, onBeat })
+    rerender({ bpm: 240, pattern: 4, sound: true, vibe: false, running: false, onBeat })
 
     expect(early.stop).not.toHaveBeenCalledWith()
     expect(pending.stop).toHaveBeenCalledWith()
@@ -531,5 +538,316 @@ describe('useBeatScheduler', () => {
 
     expect(ctx.oscillators.length).toBe(visibleCount + 3)
     hidden.mockRestore()
+  })
+
+  describe('vibration', () => {
+    // The first pattern a 120bpm 4/4 run commits. Read it left to right:
+    //   0,50      a zero-length buzz then a 50ms pause -- the API's only way
+    //             to say "start at START_OFFSET"
+    //   120,40,80 the accented downbeat, a double-hit rather than one blip
+    //   260,70    500ms spacing less the 240ms burst, then an offbeat
+    //   430,70    500ms less 70ms, then the last offbeat that fits
+    const BATCH_1 = [0, 50, 120, 40, 80, 260, 70, 430, 70]
+    // Its successor, issued once BATCH_1 has finished sounding. The accent
+    // lands at 2.05s -- exactly one 4/4 cycle after the 0.05s downbeat.
+    const BATCH_2 = [0, 300, 70, 430, 120, 40, 80, 260, 70]
+
+    afterEach(() => {
+      removeVibrateStub()
+    })
+
+    it('issues no vibration at all when vibe is off', async () => {
+      const vibrate = installVibrateStub()
+      await mount({ vibe: false })
+      const ctx = latestAudioContext()
+
+      for (let i = 1; i <= 8; i++) {
+        act(() => {
+          ctx.currentTime = i * 0.25
+          latestWorker().tick()
+        })
+      }
+
+      // Not even a cancel: nothing was ever committed to cancel.
+      expect(vibrate).not.toHaveBeenCalled()
+    })
+
+    it('hands the operating system a whole run of beats as one pattern', async () => {
+      const vibrate = installVibrateStub()
+
+      await mount({ vibe: true, bpm: 120, pattern: 4 })
+
+      expect(issuedPatterns(vibrate)).toEqual([BATCH_1])
+    })
+
+    it('does not re-issue while the current pattern is still sounding', async () => {
+      // navigator.vibrate REPLACES whatever is running rather than appending,
+      // so calling it every tick would restart the pattern 40 times a second
+      // and nothing past the first pulse would ever sound.
+      const vibrate = installVibrateStub()
+      await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+
+      for (const time of [0.25, 0.5, 0.75, 1.0]) {
+        act(() => {
+          ctx.currentTime = time
+          latestWorker().tick()
+        })
+      }
+
+      expect(issuedPatterns(vibrate)).toEqual([BATCH_1])
+    })
+
+    it('issues the next pattern only once the previous one has finished sounding', async () => {
+      // BATCH_1's final pulse spans 1.05 -> 1.12, so 1.25 is the first tick at
+      // which a replacement cannot truncate a buzz.
+      const vibrate = installVibrateStub()
+      await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+
+      for (const time of [0.25, 0.5, 0.75, 1.0, 1.25]) {
+        act(() => {
+          ctx.currentTime = time
+          latestWorker().tick()
+        })
+      }
+
+      // The second batch also pins accent phase across the seam: an
+      // implementation that restarted the pattern index per batch would put
+      // the downbeat at 1.55 and emit BATCH_1's shape again.
+      expect(issuedPatterns(vibrate)).toEqual([BATCH_1, BATCH_2])
+    })
+
+    it('covers a committed-but-unsounded beat when the tempo changes', async () => {
+      // The beat at 0.55 is already committed to the audio clock and WILL
+      // click, at the old spacing. Rebuilding the vibration from the audio
+      // cursor alone would skip it, and re-spacing it at the new tempo would
+      // put a buzz where there is no click.
+      const vibrate = installVibrateStub()
+      const { rerender, onBeat } = await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+
+      act(() => {
+        ctx.currentTime = 0.5
+        latestWorker().tick()
+      })
+
+      rerender({
+        bpm: 240,
+        pattern: 4,
+        sound: true,
+        vibe: true,
+        running: true,
+        onBeat,
+      })
+      act(() => {
+        ctx.currentTime = 0.52
+        latestWorker().tick()
+      })
+
+      // The stale pattern must be dropped, not left to run alongside.
+      expect(vibrate).toHaveBeenCalledWith(0)
+
+      const latest = issuedPatterns(vibrate).at(-1) as number[]
+      // A leading pair of 30ms puts the first buzz at 0.55 -- the pending
+      // committed beat. Anchoring on the audio cursor instead would give 530.
+      expect(latest.slice(0, 2)).toEqual([0, 30])
+    })
+
+    it('cancels the running pattern exactly once when vibration is toggled off', async () => {
+      const vibrate = installVibrateStub()
+      const { rerender, onBeat } = await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+
+      rerender({
+        bpm: 120,
+        pattern: 4,
+        sound: true,
+        vibe: false,
+        running: true,
+        onBeat,
+      })
+
+      for (const time of [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]) {
+        act(() => {
+          ctx.currentTime = time
+          latestWorker().tick()
+        })
+      }
+
+      const cancels = vibrate.mock.calls.filter(([arg]) => arg === 0)
+      expect(cancels).toHaveLength(1)
+      expect(issuedPatterns(vibrate)).toEqual([BATCH_1])
+    })
+
+    it('cancels the running pattern on Stop', async () => {
+      // Same reason the oscillators are stopped on the way out: the pattern is
+      // committed ahead of now, so it keeps buzzing after the user hits Stop.
+      const vibrate = installVibrateStub()
+      const { rerender, onBeat } = await mount({ vibe: true, bpm: 120 })
+
+      rerender({
+        bpm: 120,
+        pattern: 4,
+        sound: true,
+        vibe: true,
+        running: false,
+        onBeat,
+      })
+
+      expect(vibrate).toHaveBeenCalledWith(0)
+    })
+
+    it('re-anchors vibration onto the resynced audio grid after a long stall', async () => {
+      const vibrate = installVibrateStub()
+      await mount({ vibe: true, bpm: 240 })
+      const ctx = latestAudioContext()
+
+      // Build a real backlog the way a hidden tab does: commit beats without
+      // ever letting the drain rAF run.
+      for (let i = 1; i <= 12; i++) {
+        act(() => {
+          ctx.currentTime = i * 0.25
+          latestWorker().tick()
+        })
+      }
+
+      // A stall far past the widest lookahead. The OS is still holding a
+      // pattern built on the pre-stall grid.
+      act(() => {
+        ctx.currentTime = 30
+        latestWorker().tick()
+      })
+
+      expect(vibrate).toHaveBeenCalledWith(0)
+      const latest = issuedPatterns(vibrate).at(-1) as number[]
+      // START_OFFSET past the resynced clock: 30.05, i.e. a 50ms lead.
+      expect(latest.slice(0, 2)).toEqual([0, 50])
+    })
+
+    it('never hands the vibrator a negative or over-long entry, even after a stall', async () => {
+      const vibrate = installVibrateStub()
+      await mount({ vibe: true, bpm: 240 })
+      const ctx = latestAudioContext()
+
+      for (let i = 1; i <= 12; i++) {
+        act(() => {
+          ctx.currentTime = i * 0.25
+          latestWorker().tick()
+        })
+      }
+      act(() => {
+        ctx.currentTime = 30
+        latestWorker().tick()
+      })
+
+      const patterns = issuedPatterns(vibrate)
+      expect(patterns.length).toBeGreaterThan(1)
+      patterns.forEach((pattern) => {
+        expect(pattern.length).toBeLessThanOrEqual(MAX_VIBE_ENTRIES)
+        pattern.forEach((entry) => {
+          expect(Number.isInteger(entry)).toBe(true)
+          expect(entry).toBeGreaterThanOrEqual(0)
+          expect(entry).toBeLessThanOrEqual(MAX_ENTRY_MS)
+        })
+      })
+    })
+
+    it('issues nothing while the document is hidden', async () => {
+      // A hidden document cannot start a pattern, so issuing would burn forty
+      // refused calls a second. The wake lock is what keeps this from being
+      // the normal case.
+      const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+      const vibrate = installVibrateStub(() => false)
+
+      await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+      for (let i = 1; i <= 4; i++) {
+        act(() => {
+          ctx.currentTime = i * 0.5
+          latestWorker().tick()
+        })
+      }
+
+      expect(issuedPatterns(vibrate)).toEqual([])
+      hidden.mockRestore()
+    })
+
+    it('re-arms within one tick of becoming visible, not after a horizon', async () => {
+      const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+      const vibrate = installVibrateStub()
+      await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+      expect(issuedPatterns(vibrate)).toHaveLength(1)
+
+      // A visibility change aborts whatever the OS was running -- in both
+      // directions -- so the in-flight claim has to be dropped rather than
+      // waited out.
+      hidden.mockReturnValue(true)
+      act(() => {
+        ctx.currentTime = 0.25
+        latestWorker().tick()
+      })
+      expect(issuedPatterns(vibrate)).toHaveLength(1)
+
+      hidden.mockReturnValue(false)
+      act(() => {
+        ctx.currentTime = 0.3
+        latestWorker().tick()
+      })
+
+      // Immediately, not once the abandoned pattern would have expired.
+      expect(issuedPatterns(vibrate)).toHaveLength(2)
+      hidden.mockRestore()
+    })
+
+    it('retries on the next tick when the user agent refuses the pattern', async () => {
+      // Refusal covers a hidden race, absent hardware and permissions policy
+      // alike. Believing a refused pattern is running would silence vibration
+      // for a whole horizon.
+      const vibrate = installVibrateStub(() => false)
+      await mount({ vibe: true, bpm: 120 })
+      const ctx = latestAudioContext()
+      expect(issuedPatterns(vibrate)).toHaveLength(1)
+
+      act(() => {
+        ctx.currentTime = 0.01
+        latestWorker().tick()
+      })
+      expect(issuedPatterns(vibrate)).toHaveLength(2)
+
+      vibrate.mockImplementation(() => true)
+      act(() => {
+        ctx.currentTime = 0.02
+        latestWorker().tick()
+      })
+      expect(issuedPatterns(vibrate)).toHaveLength(3)
+
+      // Accepted this time, so the gate closes again.
+      act(() => {
+        ctx.currentTime = 0.03
+        latestWorker().tick()
+      })
+      expect(issuedPatterns(vibrate)).toHaveLength(3)
+    })
+
+    it('leaves the audio grid untouched when vibration is on', async () => {
+      installVibrateStub()
+      await mount({ vibe: true, bpm: 132 })
+      const ctx = latestAudioContext()
+
+      for (let i = 1; i <= 20; i++) {
+        act(() => {
+          ctx.currentTime = i * 0.25
+          latestWorker().tick()
+        })
+      }
+
+      const times = scheduledTimes()
+      expect(times.length).toBeGreaterThan(8)
+      for (let i = 1; i < times.length; i++) {
+        expect(times[i] - times[i - 1]).toBeCloseTo(60 / 132, 9)
+      }
+    })
   })
 })

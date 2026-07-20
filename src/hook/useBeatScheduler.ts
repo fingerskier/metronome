@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react'
 import useBeep, { NOTE_LENGTH } from '@/hook/useBeep'
+import useVibrate from '@/hook/useVibrate'
+import { buildVibrationPattern, type VibeBeat } from '@/lib/vibrationPattern'
 
 /** How often the worker wakes us to top up the schedule, in ms. */
 const TICK_MS = 25
@@ -15,6 +17,11 @@ const MAX_BPM = 1000
 /** Hard backstop making the scheduling loop provably terminating for ANY
  *  input. At the widest lookahead and MAX_BPM this is never reached. */
 const MAX_BEATS_PER_PASS = 256
+/** Ceiling on how far ahead one vibration pattern may reach, in seconds. The
+ *  Vibration API's ten-entry portable limit usually binds first; this only
+ *  stops a very slow tempo from committing a pattern so long that any tempo
+ *  change has to throw most of it away. */
+const VIBE_HORIZON = 1.5
 
 type BeatEvent = { time: number; beat: number; accent: boolean }
 
@@ -22,6 +29,7 @@ export type BeatSchedulerOptions = {
   bpm: number
   pattern: number
   sound: boolean
+  vibe: boolean
   running: boolean
   onBeat: (beat: number, accent: boolean) => void
 }
@@ -35,18 +43,20 @@ export default function useBeatScheduler({
   bpm,
   pattern,
   sound,
+  vibe,
   running,
   onBeat,
 }: BeatSchedulerOptions) {
   const { scheduleBeep, resumeAudio, audioTime } = useBeep()
+  const { vibrateBatch, cancelVibration } = useVibrate()
 
   // The scheduling loop must see the newest settings without being torn down
   // and restarted on every keystroke. Written in an effect, never during
   // render -- react-hooks/refs forbids the latter.
-  const paramsRef = useRef({ bpm, pattern, sound, onBeat })
+  const paramsRef = useRef({ bpm, pattern, sound, vibe, onBeat })
   useEffect(() => {
-    paramsRef.current = { bpm, pattern, sound, onBeat }
-  }, [bpm, pattern, sound, onBeat])
+    paramsRef.current = { bpm, pattern, sound, vibe, onBeat }
+  }, [bpm, pattern, sound, vibe, onBeat])
 
   const lookaheadRef = useRef(LOOKAHEAD_VISIBLE)
 
@@ -79,6 +89,63 @@ export default function useBeatScheduler({
     const scheduled: { osc: OscillatorNode; endsAt: number }[] = []
     let nextNoteTime = 0
     let beat = 0
+
+    // Vibration bookkeeping. None of these is a clock: they are all either
+    // compared against `now` or assigned wholesale. A second beat cursor was
+    // deliberately NOT introduced -- two accumulators advancing at different
+    // beat indices de-phase permanently on the stall path below.
+    /** Audio time from which replacing the running pattern is safe. */
+    let vibeReissueAt = -Infinity
+    /** Whether a pattern is believed to be running on the OS vibrator. */
+    let vibeArmed = false
+    /** The tempo and pattern length the in-flight batch was built for. */
+    let vibeSpb = 0
+    let vibePatternLen = 0
+    let vibeHidden = document.hidden
+
+    const invalidateVibe = () => {
+      // navigator.vibrate replaces rather than appends, so a stale pattern can
+      // only be dropped, never amended.
+      if (vibeArmed) cancelVibration()
+      vibeArmed = false
+      vibeReissueAt = -Infinity
+    }
+
+    /**
+     * The beats one pattern should cover, as a single grid in two segments.
+     *
+     * Segment one is what is already committed to the AudioContext: those
+     * beats WILL click, at whatever tempo was in force when they were
+     * committed, so re-spacing them at the current tempo would put buzzes
+     * where there are no clicks. Segment two continues from the audio cursor
+     * on the current grid.
+     */
+    const collectVibeBeats = (
+      now: number,
+      secondsPerBeat: number,
+      patternLength: number,
+    ) => {
+      const beats: VibeBeat[] = []
+
+      // Filter on time, never on index: scheduleAhead prunes `queue` only down
+      // to length 1, so it can still be holding one already-elapsed entry.
+      for (const event of queue) {
+        if (event.time > now) beats.push({ time: event.time, accent: event.accent })
+      }
+
+      // nextNoteTime is by construction the first UNcommitted beat, so the two
+      // segments abut with neither a gap nor a duplicate.
+      let time = nextNoteTime
+      let index = beat
+      let guard = 0
+      while (time <= now + VIBE_HORIZON && guard++ < MAX_BEATS_PER_PASS) {
+        if (time > now) beats.push({ time, accent: index === 0 })
+        time += secondsPerBeat
+        index = (index + 1) % patternLength
+      }
+
+      return beats
+    }
 
     const scheduleAhead = () => {
       const params = paramsRef.current
@@ -113,6 +180,10 @@ export default function useBeatScheduler({
       // missed beat at once.
       if (nextNoteTime < now - LOOKAHEAD_HIDDEN) {
         nextNoteTime = now + START_OFFSET
+        // The OS is still holding a pattern built on the pre-stall grid, which
+        // the resync has just moved out from under it. Drop it here; the pass
+        // below rebuilds against the new cursor.
+        invalidateVibe()
       }
 
       const horizon = now + lookaheadRef.current
@@ -147,6 +218,51 @@ export default function useBeatScheduler({
         // cycle through JavaScript's signed modulo.
         beat = (beat + 1) % pattern
         committed++
+      }
+
+      const hidden = document.hidden
+      if (hidden !== vibeHidden) {
+        // Per the Vibration API the user agent MUST abort a running pattern
+        // when visibility changes -- in BOTH directions. Whatever the OS was
+        // holding is already gone, so drop the claim and let the next visible
+        // pass re-arm within one tick instead of waiting out a horizon we no
+        // longer own. No cancel call: there is nothing left to cancel, and a
+        // call from a hidden document would be refused anyway.
+        vibeHidden = hidden
+        vibeArmed = false
+        vibeReissueAt = -Infinity
+      }
+
+      if (!params.vibe) {
+        invalidateVibe()
+      } else if (!hidden) {
+        // A tempo or pattern change re-phases every beat the in-flight pattern
+        // covers; without this the buzz would lag the click by up to a whole
+        // horizon.
+        if (secondsPerBeat !== vibeSpb || pattern !== vibePatternLen) {
+          invalidateVibe()
+        }
+
+        // The gate is the END of the last committed pulse -- the earliest
+        // instant at which replacing the pattern cannot cut a buzz short. The
+        // duty clamp keeps that instant at least 0.4 beats before the next
+        // one, so this window is always several worker ticks wide.
+        if (now >= vibeReissueAt) {
+          const batch = buildVibrationPattern(
+            collectVibeBeats(now, secondsPerBeat, pattern),
+            now,
+            secondsPerBeat,
+          )
+          if (batch.pattern.length > 0 && vibrateBatch(batch.pattern)) {
+            vibeArmed = true
+            vibeReissueAt = batch.reissueAt
+            vibeSpb = secondsPerBeat
+            vibePatternLen = pattern
+          }
+          // A refusal leaves the gate open, so the next 25ms tick retries.
+          // That covers a hidden race, absent hardware and a permissions
+          // policy alike -- recovery in one tick rather than one horizon.
+        }
       }
     }
 
@@ -217,6 +333,10 @@ export default function useBeatScheduler({
         worker.terminate()
       }
 
+      // Same reasoning as the oscillator loop below: the vibration pattern is
+      // committed ahead of now, so without this it keeps buzzing after Stop.
+      if (vibeArmed) cancelVibration()
+
       // Beats are committed ahead of now, so without this they keep sounding
       // after the user hit Stop.
       for (const { osc } of scheduled) {
@@ -231,5 +351,12 @@ export default function useBeatScheduler({
       scheduled.length = 0
       queue.length = 0
     }
-  }, [running, audioTime, scheduleBeep, resumeAudio])
+  }, [
+    running,
+    audioTime,
+    scheduleBeep,
+    resumeAudio,
+    vibrateBatch,
+    cancelVibration,
+  ])
 }

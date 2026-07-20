@@ -3,21 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { latestAudioContext } from './test/audioStub'
 import { latestWorker } from './test/workerStub'
+import {
+  installVibrateStub,
+  issuedPatterns,
+  removeVibrateStub,
+} from './test/vibrateStub'
 
 beforeEach(() => {
   localStorage.clear()
 })
 
-/** jsdom has no Vibration API by default; installs a spy and removes it. */
-function stubVibrate() {
-  const vibrate = vi.fn()
-  Object.defineProperty(navigator, 'vibrate', {
-    value: vibrate,
-    configurable: true,
-    writable: true,
-  })
-  return vibrate
-}
+afterEach(() => {
+  removeVibrateStub()
+})
 
 describe('App', () => {
   it('starts at 120bpm in 4/4', () => {
@@ -103,13 +101,7 @@ describe('App', () => {
       vi.useRealTimers()
     })
 
-    it('drives the blip and vibration from onBeat, honoring a vibration toggle on the next beat', async () => {
-      // Regression guard for App's vibeRef indirection: onBeat is a stable
-      // useCallback that does not close over `vibe` directly (only over
-      // `vibrate`), so a vibration toggle must take effect starting with the
-      // very next beat -- not be stuck at whatever `vibe` was when onBeat (or
-      // the scheduler's effect) was first created.
-      const vibrate = stubVibrate()
+    it('drives the blip from onBeat', async () => {
       render(<App />)
 
       fireEvent.click(screen.getByRole('button', { name: 'Start' }))
@@ -130,14 +122,8 @@ describe('App', () => {
       })
 
       expect(screen.getByText('🟢')).toBeDefined()
-      expect(vibrate).not.toHaveBeenCalled()
 
-      // Toggle vibration on WHILE running -- this is the moment a stale
-      // closure would fail to take effect.
-      fireEvent.click(screen.getByLabelText(/vibration/i))
-
-      // Commit and report the next beat: 120bpm default -> 0.5s spacing, an
-      // unaccented offbeat.
+      // 120bpm default -> 0.5s spacing, an unaccented offbeat.
       act(() => {
         ctx.currentTime = 0.5
         worker.tick()
@@ -148,7 +134,51 @@ describe('App', () => {
       })
 
       expect(screen.getByText('⚪')).toBeDefined()
-      expect(vibrate).toHaveBeenCalledWith(20)
+    })
+
+    it('hands the vibration toggle to the scheduler, taking effect on the next pass', async () => {
+      // Vibration is committed ahead of time by the scheduler rather than
+      // fired from onBeat, so what App owes it is the live value of the
+      // toggle: flipping it while running must reach the very next scheduling
+      // pass, not be stuck at whatever it was when the effect was created.
+      const vibrate = installVibrateStub()
+      render(<App />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+      await act(async () => {})
+
+      const ctx = latestAudioContext()
+      const worker = latestWorker()
+
+      act(() => {
+        ctx.currentTime = 0.1
+        worker.tick()
+      })
+      expect(vibrate).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByLabelText(/vibration/i))
+
+      act(() => {
+        ctx.currentTime = 0.2
+        worker.tick()
+      })
+
+      // One whole run of beats, handed over as a single pattern.
+      const patterns = issuedPatterns(vibrate)
+      expect(patterns).toHaveLength(1)
+      expect(patterns[0].length).toBeGreaterThan(2)
+    })
+
+    it('warns that vibration stops while the page is hidden, only when it is on', async () => {
+      // The batch runs in the OS vibrator service, but the user agent still
+      // aborts it on any visibility change -- so this is a limitation to state
+      // plainly rather than paper over.
+      render(<App />)
+      expect(screen.queryByText(/vibration stops/i)).toBeNull()
+
+      fireEvent.click(screen.getByLabelText(/vibration/i))
+
+      expect(screen.getByText(/vibration stops/i)).toBeDefined()
     })
   })
 })

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocalStorage } from 'react-use'
 import useBeatScheduler from '@/hook/useBeatScheduler'
-import useVibrate from '@/hook/useVibrate'
+import useWakeLock from '@/hook/useWakeLock'
 import Blip from '@/com/Blip'
 
 import './App.css'
@@ -18,34 +18,38 @@ export default function App() {
   const [running, setRunning] = useState(false)
   const [tick, setTick] = useState(false)
 
-  const vibrate = useVibrate()
   const blipTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
-  const vibeRef = useRef(vibe)
-  useEffect(() => {
-    vibeRef.current = vibe
-  }, [vibe])
 
-  const onBeat = useCallback(
-    (_beat: number, accented: boolean) => {
-      setTick(true)
-      setAccent(accented)
-      if (vibeRef.current) vibrate(accented)
+  // Only the visual blip lives here. Vibration is committed ahead of time by
+  // the scheduler, on the same grid as the click: this callback runs off the
+  // drain rAF, which is parked while the tab is hidden and deliberately
+  // collapses a backlog to the most recent beat -- right for the UI, wrong for
+  // haptics.
+  const onBeat = useCallback((_beat: number, accented: boolean) => {
+    setTick(true)
+    setAccent(accented)
 
-      clearTimeout(blipTimeout.current)
-      blipTimeout.current = setTimeout(() => {
-        setTick(false)
-      }, 100)
-    },
-    [vibrate],
-  )
+    clearTimeout(blipTimeout.current)
+    blipTimeout.current = setTimeout(() => {
+      setTick(false)
+    }, 100)
+  }, [])
 
   useBeatScheduler({
     bpm: bpm ?? 120,
     pattern: pattern ?? 4,
     sound: sound ?? true,
+    vibe: vibe ?? false,
     running,
     onBeat,
   })
+
+  // A hidden document cannot vibrate at all, and the user agent aborts any
+  // running pattern the moment the screen goes off -- so holding the screen
+  // awake is what makes pocket use possible. Scoped to vibration rather than
+  // to `running`: keeping the screen lit for audio-only practice is a battery
+  // cost with nothing to show for it.
+  useWakeLock(running && (vibe ?? false))
 
   useEffect(() => {
     return () => {
@@ -104,6 +108,11 @@ export default function App() {
         {vibe ? '📳On' : '📴Off'}
       </button>
     </div>
+
+    {vibe && <p className="hint">
+      Keep this page on screen -- vibration stops whenever the page is hidden.
+      The screen is held awake while the metronome runs.
+    </p>}
 
     <button onClick={() => setRunning(!running)}>
       {running ? 'Stop' : 'Start'}
