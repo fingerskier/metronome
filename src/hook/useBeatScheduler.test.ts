@@ -102,6 +102,64 @@ describe('useBeatScheduler', () => {
     }
   })
 
+  it('falls back to a safe tempo instead of hanging when bpm is Infinity', async () => {
+    // Typing "1e400" into a number input parses to Infinity -- min/max on a
+    // number input are advisory and do not clamp typed values. An unguarded
+    // fallback computes secondsPerBeat = 60 / Infinity = 0: nextNoteTime never
+    // advances, so the while-loop in scheduleAhead never reaches its horizon
+    // and hangs the tab (and, since sound defaults true, allocates oscillators
+    // until the process runs out of memory).
+    await mount({ bpm: Infinity })
+    const ctx = latestAudioContext()
+
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+
+    const times = scheduledTimes()
+    expect(times.length).toBeGreaterThan(4)
+
+    // A non-finite bpm must fall back to the same default tempo used
+    // elsewhere in this file (120bpm), not to a zero or vanishing spacing.
+    const expected = 60 / 120
+    for (let i = 1; i < times.length; i++) {
+      expect(times[i] - times[i - 1]).toBeCloseTo(expected, 9)
+    }
+  })
+
+  it('clamps an astronomically large finite bpm to a sane tempo', async () => {
+    // A huge but finite bpm passes a bare `> 0` check and produces a
+    // secondsPerBeat so small the loop would need astronomically many
+    // iterations to reach its horizon -- a hang in practice, and (since sound
+    // defaults true) an oscillator-allocating one. The fix must clamp bpm to
+    // MAX_BPM rather than merely rejecting non-finite values.
+    await mount({ bpm: 1e18 })
+    const ctx = latestAudioContext()
+
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+
+    const times = scheduledTimes()
+    expect(times.length).toBeGreaterThan(4)
+
+    // Every gap must be a sane, strictly positive spacing matching the
+    // MAX_BPM clamp (60/1000s) -- not the vanishingly small (effectively
+    // zero) gap an unclamped 1e18bpm implies.
+    const expected = 60 / 1000
+    for (let i = 1; i < times.length; i++) {
+      const gap = times[i] - times[i - 1]
+      expect(gap).toBeGreaterThan(0)
+      expect(gap).toBeCloseTo(expected, 9)
+    }
+  })
+
   it('accents the first beat of a run and every pattern-th beat after', async () => {
     await mount({ bpm: 240, pattern: 4 })
     const ctx = latestAudioContext()

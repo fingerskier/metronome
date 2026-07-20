@@ -8,6 +8,11 @@ const LOOKAHEAD_VISIBLE = 0.1
 /** The first beat lands this far in the future; scheduling at exactly
  *  currentTime plays immediately and loses envelope precision. */
 const START_OFFSET = 0.05
+/** Well above the UI ceiling of 300, so it never interferes with real use. */
+const MAX_BPM = 1000
+/** Hard backstop making the scheduling loop provably terminating for ANY
+ *  input. At the widest lookahead and MAX_BPM this is never reached. */
+const MAX_BEATS_PER_PASS = 256
 
 export type BeatSchedulerOptions = {
   bpm: number
@@ -52,13 +57,26 @@ export default function useBeatScheduler({
 
     const scheduleAhead = () => {
       const params = paramsRef.current
-      // Guard on positivity, not truthiness: a negative bpm is truthy, and a
-      // negative secondsPerBeat makes the while-loop below walk away from its
-      // horizon forever, hanging the tab on the main thread.
-      const secondsPerBeat = 60 / (params.bpm > 0 ? params.bpm : 120)
+      // Clamp on finiteness AND positivity, not truthiness. A negative bpm is
+      // truthy and yields a negative secondsPerBeat, walking the loop away
+      // from its horizon; Infinity -- reachable by typing "1e400", since a
+      // number input's min/max are advisory -- yields zero, so the loop never
+      // advances at all. Both hang the tab synchronously on the main thread.
+      const bpm =
+        Number.isFinite(params.bpm) && params.bpm > 0
+          ? Math.min(params.bpm, MAX_BPM)
+          : 120
+      const secondsPerBeat = 60 / bpm
+      const pattern =
+        Number.isFinite(params.pattern) && params.pattern > 0
+          ? Math.floor(params.pattern)
+          : 4
       const horizon = audioTime() + lookaheadRef.current
 
-      while (nextNoteTime < horizon) {
+      // The count is a backstop, not a policy: clamping bpm already bounds the
+      // beats per pass. It exists so no future input can reintroduce a hang.
+      let committed = 0
+      while (nextNoteTime < horizon && committed < MAX_BEATS_PER_PASS) {
         const accent = beat === 0
 
         // Muting silences the click but must not pause the beat -- the blip and
@@ -71,7 +89,8 @@ export default function useBeatScheduler({
         // Same reasoning as the bpm guard above: a negative pattern is
         // truthy, and while it can't hang the loop, it corrupts the accent
         // cycle through JavaScript's signed modulo.
-        beat = (beat + 1) % (params.pattern > 0 ? params.pattern : 4)
+        beat = (beat + 1) % pattern
+        committed++
       }
     }
 
