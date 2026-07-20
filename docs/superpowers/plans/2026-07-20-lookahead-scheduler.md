@@ -781,7 +781,7 @@ export default function useBeatScheduler({
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: PASS, 9 tests.
+Expected: PASS, 9 tests (this count grew to 14 during Task 3 review fixes; verify against the real file rather than this number).
 
 - [ ] **Step 5: Commit**
 
@@ -893,7 +893,7 @@ Then cancel them in the cleanup, after the worker teardown:
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: PASS, 10 tests.
+Expected: PASS. Task 3 review fixes grew the file well past the count written here, so verify against the real file rather than trusting a number.
 
 - [ ] **Step 6: Commit**
 
@@ -1045,7 +1045,7 @@ Finally clear the queue alongside the scheduled notes:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: PASS, 13 tests.
+Expected: PASS -- 3 more than the file had before this task (18 at time of writing).
 
 If the drain never runs, confirm `vi.useFakeTimers()` is faking `requestAnimationFrame` — it is in Vitest 4's default `toFake` set. Do not switch the drain to `setTimeout`.
 
@@ -1140,7 +1140,7 @@ Then, immediately after the `lookaheadRef` declaration, insert:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: PASS, 15 tests.
+Expected: PASS -- 2 more than the file had before this task (20 at time of writing).
 
 - [ ] **Step 5: Commit**
 
@@ -1247,7 +1247,7 @@ git rm src/hook/useTimer.ts src/hook/useTimer.test.ts
 - [ ] **Step 4: Run the whole suite, lint and build**
 
 Run: `npm test`
-Expected: PASS. `useTimer`'s 12 tests are gone; `useBeep` has 10, `useBeatScheduler` 15, `useVibrate` 4, `App` 8 — 37 total.
+Expected: PASS, and this is the first task where the FULL suite must be green. useTimer's 12 tests are gone; useBeep has 10, useVibrate 4, App 8, and useBeatScheduler around 20 -- it grew during Task 3 and 4 review fixes. Verify the real total rather than a number written before those fixes.
 
 Run: `npm run lint`
 Expected: exit 0. If `react-hooks/refs` still fires, a ref is being written during render somewhere in App.
