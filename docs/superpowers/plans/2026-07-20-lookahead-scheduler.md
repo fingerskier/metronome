@@ -18,7 +18,7 @@
 - `strict`, `noUnusedLocals`, `noUnusedParameters` are on.
 - eslint-plugin-react-hooks 7 enforces React Compiler rules. **Never write a ref during render** (`react-hooks/refs`) — do it in an effect. **Never self-reference a `useCallback`** (`react-hooks/immutability`) — declare self-scheduling loops as plain local functions inside the effect that owns them.
 - Verified by spike, do not re-litigate: Vite 8/Rolldown bundles `new Worker(new URL('./x.worker.ts', import.meta.url), {type:'module'})` natively, emits `assets/scheduler.worker-<hash>.js`, workbox precaches it, and the `/metronome/` base is baked in correctly. **No changes to `vite.config.ts` or any `tsconfig.*` are needed.**
-- Every task ends green: `npm test`, `npm run lint`, `npm run build` all exit 0.
+- **Green gate, per task.** Tasks 1–6 are a refactor in flight: `src/App.tsx` still calls the old `beep()` API until Task 7, so `tsc -b` — and therefore `npm run build` and the full `npm test` — legitimately fail in between. During Tasks 1–6 the gate is the task's own focused test file passing, with a real red step observed first. The full `npm test`, `npm run lint` and `npm run build` must all exit 0 from **Task 7 onward**, and Task 7 is not complete until they do. Do not "fix" the intermediate failure by leaving compatibility shims behind.
 - Branch is `feat/lookahead-scheduler`. Do not push; `main` auto-deploys.
 
 ---
@@ -649,11 +649,14 @@ import useBeep from '@/hook/useBeep'
 const TICK_MS = 25
 /** How far ahead to commit beats while the tab is visible, in seconds. */
 const LOOKAHEAD_VISIBLE = 0.1
-/** How far ahead while hidden -- must outlast throttled timers. */
-const LOOKAHEAD_HIDDEN = 2
 /** The first beat lands this far in the future; scheduling at exactly
  *  currentTime plays immediately and loses envelope precision. */
 const START_OFFSET = 0.05
+/** Well above the UI ceiling of 300, so it never interferes with real use. */
+const MAX_BPM = 1000
+/** Hard backstop making the scheduling loop provably terminating for ANY
+ *  input. At the widest lookahead and MAX_BPM this is never reached. */
+const MAX_BEATS_PER_PASS = 256
 
 export type BeatSchedulerOptions = {
   bpm: number
@@ -698,10 +701,26 @@ export default function useBeatScheduler({
 
     const scheduleAhead = () => {
       const params = paramsRef.current
-      const secondsPerBeat = 60 / (params.bpm || 120)
+      // Clamp on finiteness AND positivity, not truthiness. A negative bpm is
+      // truthy and yields a negative secondsPerBeat, walking the loop away
+      // from its horizon; Infinity -- reachable by typing "1e400", since a
+      // number input's min/max are advisory -- yields zero, so the loop never
+      // advances at all. Both hang the tab synchronously on the main thread.
+      const bpm =
+        Number.isFinite(params.bpm) && params.bpm > 0
+          ? Math.min(params.bpm, MAX_BPM)
+          : 120
+      const secondsPerBeat = 60 / bpm
+      const pattern =
+        Number.isFinite(params.pattern) && params.pattern > 0
+          ? Math.floor(params.pattern)
+          : 4
       const horizon = audioTime() + lookaheadRef.current
 
-      while (nextNoteTime < horizon) {
+      // The count is a backstop, not a policy: clamping bpm already bounds the
+      // beats per pass. It exists so no future input can reintroduce a hang.
+      let committed = 0
+      while (nextNoteTime < horizon && committed < MAX_BEATS_PER_PASS) {
         const accent = beat === 0
 
         // Muting silences the click but must not pause the beat -- the blip and
@@ -711,7 +730,8 @@ export default function useBeatScheduler({
         }
 
         nextNoteTime += secondsPerBeat
-        beat = (beat + 1) % (params.pattern || 4)
+        beat = (beat + 1) % pattern
+        committed++
       }
     }
 
@@ -1084,7 +1104,14 @@ Expected: FAIL — only 1 oscillator, because the lookahead is still fixed at 0.
 
 - [ ] **Step 3: Implement the visibility listener**
 
-In `src/hook/useBeatScheduler.ts`, immediately after the `lookaheadRef` declaration, insert:
+First add the hidden-tab lookahead constant, immediately after `LOOKAHEAD_VISIBLE`. It is introduced here rather than in Task 3 because this is the first task that consumes it — declaring it earlier trips `noUnusedLocals`, and exporting it purely to satisfy the compiler would widen the module's public surface for no reason:
+
+```ts
+/** How far ahead while hidden -- must outlast throttled timers. */
+const LOOKAHEAD_HIDDEN = 2
+```
+
+Then, immediately after the `lookaheadRef` declaration, insert:
 
 ```ts
   // A lookahead wide enough to outlast a throttled hidden tab would make the
