@@ -444,4 +444,31 @@ describe('useBeatScheduler', () => {
     // A dozen beats are due at once. Replaying them would machine-gun the UI.
     expect(onBeat.mock.calls.length).toBeLessThanOrEqual(2)
   })
+
+  it('commits far more beats ahead while the tab is hidden', async () => {
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+
+    const { onBeat } = await mount({ bpm: 120 })
+    expect(onBeat).not.toHaveBeenCalled()
+
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      latestWorker().tick()
+    })
+
+    // A 2s lookahead at 120bpm is about four beats; a 0.1s one is a single beat.
+    expect(latestAudioContext().oscillators.length).toBeGreaterThanOrEqual(4)
+    hidden.mockRestore()
+  })
+
+  it('commits only the next beat or so while visible', async () => {
+    await mount({ bpm: 120 })
+
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      latestWorker().tick()
+    })
+
+    expect(latestAudioContext().oscillators.length).toBeLessThanOrEqual(2)
+  })
 })

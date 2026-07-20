@@ -5,6 +5,8 @@ import useBeep, { NOTE_LENGTH } from '@/hook/useBeep'
 const TICK_MS = 25
 /** How far ahead to commit beats while the tab is visible, in seconds. */
 const LOOKAHEAD_VISIBLE = 0.1
+/** How far ahead while hidden -- must outlast throttled timers. */
+const LOOKAHEAD_HIDDEN = 2
 /** The first beat lands this far in the future; scheduling at exactly
  *  currentTime plays immediately and loses envelope precision. */
 const START_OFFSET = 0.05
@@ -47,6 +49,24 @@ export default function useBeatScheduler({
   }, [bpm, pattern, sound, onBeat])
 
   const lookaheadRef = useRef(LOOKAHEAD_VISIBLE)
+
+  // A lookahead wide enough to outlast a throttled hidden tab would make the
+  // BPM control feel dead for two seconds, because the next two seconds of
+  // beats are already committed. Widening it only while hidden gives instant
+  // tempo response when the user can actually see the app, and nobody adjusts
+  // tempo while the tab is in the background.
+  useEffect(() => {
+    const sync = () => {
+      lookaheadRef.current = document.hidden
+        ? LOOKAHEAD_HIDDEN
+        : LOOKAHEAD_VISIBLE
+    }
+    sync()
+    document.addEventListener('visibilitychange', sync)
+    return () => {
+      document.removeEventListener('visibilitychange', sync)
+    }
+  }, [])
 
   useEffect(() => {
     if (!running) return
