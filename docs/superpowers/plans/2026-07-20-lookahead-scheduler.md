@@ -984,19 +984,27 @@ Append inside the `describe` block:
     const { onBeat } = await mount({ bpm: 240, pattern: 4 })
     const ctx = latestAudioContext()
 
-    // Commit a long run of beats, as a hidden tab with a wide lookahead would.
-    act(() => {
-      ctx.currentTime = 0.1
-      latestWorker().tick()
-    })
+    // Build a REAL backlog. Ticking the worker commits beats, but the drain
+    // only runs when timers advance -- so ticking without advancing lets the
+    // queue accumulate exactly as it does while the tab is hidden and rAF is
+    // parked. A single tick would queue one beat and prove nothing: the test
+    // must be able to fail if the drain fires every due entry instead of the
+    // last one.
+    for (let i = 1; i <= 12; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+    expect(onBeat).not.toHaveBeenCalled()
 
-    // Jump the audio clock far past all of them, then run a single frame.
+    // Jump the audio clock past every queued beat, then run a single frame.
     act(() => {
       ctx.currentTime = 30
       vi.advanceTimersByTime(20)
     })
 
-    // 30s at 240bpm would be 120 beats if it tried to replay them all.
+    // A dozen beats are due at once. Replaying them would machine-gun the UI.
     expect(onBeat.mock.calls.length).toBeLessThanOrEqual(2)
   })
 ```
