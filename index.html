@@ -9,7 +9,10 @@
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <meta name="apple-mobile-web-app-title" content="Metronome" />
-    <link rel="manifest" href="/site.webmanifest" />
+    <!-- The manifest link is injected by vite-plugin-pwa, generated from
+         public/site.webmanifest (see vite.config.ts). Do not add one by hand:
+         browsers honour only the first, so a second link silently shadows the
+         plugin's and drops the start_url/scope it derives from `base`. -->
 
     <title>Metronome</title>
   </head>
