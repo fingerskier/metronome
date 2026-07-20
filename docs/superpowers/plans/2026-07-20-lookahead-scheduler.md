@@ -437,7 +437,9 @@ git commit -m "feat(worker): add scheduler heartbeat worker and drivable test st
 
 **Interfaces:**
 - Consumes: `useBeep()` from Task 1 (`scheduleBeep`, `audioTime`, `resumeAudio`); `latestWorker()` from Task 2.
-- Produces: `useBeatScheduler({bpm, pattern, sound, running, onBeat}): { resumeAudio(): Promise<void> }`, where `onBeat: (beat: number, accent: boolean) => void`.
+- Produces: `useBeatScheduler({bpm, pattern, sound, running, onBeat}): { resumeAudio(): Promise<void> }`, where `onBeat: (beat: number, accent: boolean) => void`. `onBeat` is accepted now but not yet called — Task 5 delivers beats to it.
+
+**Scope note:** this task schedules audio and nothing else. Cancelling committed notes is Task 4; delivering beats to the UI is Task 5. Do not implement them early — each has its own failing test first.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -534,7 +536,6 @@ describe('useBeatScheduler', () => {
     // 880Hz marks an accent, 440Hz an offbeat.
     const freqs = ctx.oscillators.map((osc) => osc.frequency.value)
     expect(freqs.length).toBeGreaterThanOrEqual(8)
-    expect(freqs[0]).toBe(880)
     freqs.slice(0, 8).forEach((f, i) => {
       expect(f).toBe(i % 4 === 0 ? 880 : 440)
     })
@@ -599,219 +600,6 @@ describe('useBeatScheduler', () => {
 
     expect(latestAudioContext().oscillators).toHaveLength(0)
   })
-})
-```
-
-- [ ] **Step 2: Run the tests to verify they fail**
-
-Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: FAIL — cannot resolve `./useBeatScheduler`.
-
-- [ ] **Step 3: Implement the scheduler**
-
-Create `src/hook/useBeatScheduler.ts`:
-
-```ts
-import { useEffect, useRef } from 'react'
-import useBeep from '@/hook/useBeep'
-
-/** How often the worker wakes us to top up the schedule, in ms. */
-const TICK_MS = 25
-/** How far ahead to commit beats while the tab is visible, in seconds. */
-const LOOKAHEAD_VISIBLE = 0.1
-/** How far ahead while hidden -- must outlast throttled timers. */
-const LOOKAHEAD_HIDDEN = 2
-/** The first beat lands this far in the future; scheduling at exactly
- *  currentTime plays immediately and loses envelope precision. */
-const START_OFFSET = 0.05
-
-type BeatEvent = { time: number; beat: number; accent: boolean }
-
-export type BeatSchedulerOptions = {
-  bpm: number
-  pattern: number
-  sound: boolean
-  running: boolean
-  onBeat: (beat: number, accent: boolean) => void
-}
-
-/**
- * Owns metronome timing. Beats are committed to the AudioContext clock ahead of
- * time, so playback is immune to main-thread scheduling and survives a
- * backgrounded tab. A separate rAF loop reports each beat to the UI at the
- * moment it actually sounds -- that half necessarily stops when hidden.
- */
-export default function useBeatScheduler({
-  bpm,
-  pattern,
-  sound,
-  running,
-  onBeat,
-}: BeatSchedulerOptions) {
-  const { scheduleBeep, resumeAudio, audioTime } = useBeep()
-
-  // The scheduling loop must see the newest settings without being torn down
-  // and restarted on every keystroke. Written in an effect, never during
-  // render -- react-hooks/refs forbids the latter.
-  const paramsRef = useRef({ bpm, pattern, sound, onBeat })
-  useEffect(() => {
-    paramsRef.current = { bpm, pattern, sound, onBeat }
-  }, [bpm, pattern, sound, onBeat])
-
-  const lookaheadRef = useRef(LOOKAHEAD_VISIBLE)
-
-  useEffect(() => {
-    if (!running) return
-
-    let cancelled = false
-    let frame = 0
-    let worker: Worker | null = null
-
-    const queue: BeatEvent[] = []
-    const scheduled: OscillatorNode[] = []
-    let nextNoteTime = 0
-    let beat = 0
-
-    const scheduleAhead = () => {
-      const params = paramsRef.current
-      const secondsPerBeat = 60 / (params.bpm || 120)
-      const horizon = audioTime() + lookaheadRef.current
-
-      while (nextNoteTime < horizon) {
-        const accent = beat === 0
-
-        // Muting silences the click but must not pause the beat -- the blip and
-        // vibration keep working.
-        if (params.sound) {
-          const osc = scheduleBeep(nextNoteTime, accent)
-          if (osc) scheduled.push(osc)
-        }
-
-        queue.push({ time: nextNoteTime, beat, accent })
-        nextNoteTime += secondsPerBeat
-        beat = (beat + 1) % (params.pattern || 4)
-      }
-    }
-
-    // Plain local function, not a useCallback: it schedules itself, and a
-    // useCallback cannot reference its own result (react-hooks/immutability).
-    const drain = () => {
-      const now = audioTime()
-      let due: BeatEvent | undefined
-
-      // Take only the most recent due beat. Returning from a hidden tab leaves
-      // a pile of elapsed beats queued, and firing them all would machine-gun
-      // the UI instead of resyncing.
-      while (queue.length > 0 && queue[0].time <= now) {
-        due = queue.shift()
-      }
-
-      if (due) paramsRef.current.onBeat(due.beat, due.accent)
-      frame = requestAnimationFrame(drain)
-    }
-
-    const begin = async () => {
-      try {
-        await resumeAudio()
-      } catch {
-        // A blocked context should not stop the visual metronome.
-      }
-      if (cancelled) return
-
-      nextNoteTime = audioTime() + START_OFFSET
-      beat = 0
-
-      worker = new Worker(
-        new URL('../worker/scheduler.worker.ts', import.meta.url),
-        { type: 'module' },
-      )
-      worker.onmessage = () => {
-        scheduleAhead()
-      }
-      worker.postMessage({ type: 'start', interval: TICK_MS })
-
-      scheduleAhead()
-      frame = requestAnimationFrame(drain)
-    }
-
-    void begin()
-
-    return () => {
-      cancelled = true
-      if (frame) cancelAnimationFrame(frame)
-
-      if (worker) {
-        worker.postMessage({ type: 'stop' })
-        worker.terminate()
-      }
-
-      // Beats are committed ahead of now, so without this they keep sounding
-      // after the user hit Stop.
-      for (const osc of scheduled) {
-        try {
-          osc.stop()
-        } catch {
-          // Already stopped or never started; nothing to undo.
-        }
-        osc.disconnect()
-      }
-      scheduled.length = 0
-      queue.length = 0
-    }
-  }, [running, audioTime, scheduleBeep, resumeAudio])
-
-  return { resumeAudio }
-}
-```
-
-- [ ] **Step 4: Run the tests to verify they pass**
-
-Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: PASS, 7 tests.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/hook/useBeatScheduler.ts src/hook/useBeatScheduler.test.ts
-git commit -m "feat(scheduler): commit beats to the audio clock ahead of time"
-```
-
----
-
-### Task 4: Stop cancels beats already committed to the future
-
-**Files:**
-- Test: `src/hook/useBeatScheduler.test.ts`
-
-**Interfaces:**
-- Consumes: `useBeatScheduler` from Task 3. The cancel behaviour is already implemented in its cleanup; this task proves it and guards it.
-
-- [ ] **Step 1: Write the failing tests**
-
-Append inside the `describe` block in `src/hook/useBeatScheduler.test.ts`:
-
-```ts
-  it('cancels beats already scheduled into the future when stopped', async () => {
-    const { rerender, onBeat } = await mount({ bpm: 60 })
-    const ctx = latestAudioContext()
-
-    act(() => {
-      ctx.currentTime = 1
-      latestWorker().tick()
-    })
-
-    const committed = ctx.oscillators.length
-    expect(committed).toBeGreaterThan(0)
-
-    rerender({ bpm: 60, pattern: 4, sound: true, running: false, onBeat })
-
-    // Every note the scheduler committed to must be actively cancelled --
-    // otherwise it still sounds after Stop.
-    ctx.oscillators.forEach((osc) => {
-      expect(osc.stop).toHaveBeenCalledWith()
-      expect(osc.disconnect).toHaveBeenCalled()
-    })
-  })
 
   it('tells the worker to stop and terminates it', async () => {
     const { rerender, onBeat } = await mount()
@@ -841,11 +629,161 @@ Append inside the `describe` block in `src/hook/useBeatScheduler.test.ts`:
     const firstAfterRestart = ctx.oscillators[beforeRestart]
     expect(firstAfterRestart.frequency.value).toBe(880)
   })
+})
 ```
 
-- [ ] **Step 2: Add `disconnect` to the oscillator stub**
+- [ ] **Step 2: Run the tests to verify they fail**
 
-The stub has no `disconnect`, so these tests fail on a missing method rather than on behaviour. In `src/test/audioStub.ts`, add it to `StubOscillator`:
+Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
+Expected: FAIL — cannot resolve `./useBeatScheduler`.
+
+- [ ] **Step 3: Implement scheduling**
+
+Create `src/hook/useBeatScheduler.ts`:
+
+```ts
+import { useEffect, useRef } from 'react'
+import useBeep from '@/hook/useBeep'
+
+/** How often the worker wakes us to top up the schedule, in ms. */
+const TICK_MS = 25
+/** How far ahead to commit beats while the tab is visible, in seconds. */
+const LOOKAHEAD_VISIBLE = 0.1
+/** How far ahead while hidden -- must outlast throttled timers. */
+const LOOKAHEAD_HIDDEN = 2
+/** The first beat lands this far in the future; scheduling at exactly
+ *  currentTime plays immediately and loses envelope precision. */
+const START_OFFSET = 0.05
+
+export type BeatSchedulerOptions = {
+  bpm: number
+  pattern: number
+  sound: boolean
+  running: boolean
+  onBeat: (beat: number, accent: boolean) => void
+}
+
+/**
+ * Owns metronome timing. Beats are committed to the AudioContext clock ahead of
+ * time, so playback is immune to main-thread scheduling and survives a
+ * backgrounded tab.
+ */
+export default function useBeatScheduler({
+  bpm,
+  pattern,
+  sound,
+  running,
+  onBeat,
+}: BeatSchedulerOptions) {
+  const { scheduleBeep, resumeAudio, audioTime } = useBeep()
+
+  // The scheduling loop must see the newest settings without being torn down
+  // and restarted on every keystroke. Written in an effect, never during
+  // render -- react-hooks/refs forbids the latter.
+  const paramsRef = useRef({ bpm, pattern, sound, onBeat })
+  useEffect(() => {
+    paramsRef.current = { bpm, pattern, sound, onBeat }
+  }, [bpm, pattern, sound, onBeat])
+
+  const lookaheadRef = useRef(LOOKAHEAD_VISIBLE)
+
+  useEffect(() => {
+    if (!running) return
+
+    let cancelled = false
+    let worker: Worker | null = null
+
+    let nextNoteTime = 0
+    let beat = 0
+
+    const scheduleAhead = () => {
+      const params = paramsRef.current
+      const secondsPerBeat = 60 / (params.bpm || 120)
+      const horizon = audioTime() + lookaheadRef.current
+
+      while (nextNoteTime < horizon) {
+        const accent = beat === 0
+
+        // Muting silences the click but must not pause the beat -- the blip and
+        // vibration keep working.
+        if (params.sound) {
+          scheduleBeep(nextNoteTime, accent)
+        }
+
+        nextNoteTime += secondsPerBeat
+        beat = (beat + 1) % (params.pattern || 4)
+      }
+    }
+
+    const begin = async () => {
+      try {
+        await resumeAudio()
+      } catch {
+        // A blocked context should not stop the visual metronome.
+      }
+      if (cancelled) return
+
+      nextNoteTime = audioTime() + START_OFFSET
+      beat = 0
+
+      worker = new Worker(
+        new URL('../worker/scheduler.worker.ts', import.meta.url),
+        { type: 'module' },
+      )
+      worker.onmessage = () => {
+        scheduleAhead()
+      }
+      worker.postMessage({ type: 'start', interval: TICK_MS })
+
+      scheduleAhead()
+    }
+
+    void begin()
+
+    return () => {
+      cancelled = true
+
+      if (worker) {
+        worker.postMessage({ type: 'stop' })
+        worker.terminate()
+      }
+    }
+  }, [running, audioTime, scheduleBeep, resumeAudio])
+
+  return { resumeAudio }
+}
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
+Expected: PASS, 9 tests.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/hook/useBeatScheduler.ts src/hook/useBeatScheduler.test.ts
+git commit -m "feat(scheduler): commit beats to the audio clock ahead of time"
+```
+
+---
+
+### Task 4: Stop cancels beats already committed to the future
+
+**Files:**
+- Modify: `src/hook/useBeatScheduler.ts`
+- Modify: `src/test/audioStub.ts`
+- Test: `src/hook/useBeatScheduler.test.ts`
+
+**Interfaces:**
+- Consumes: `useBeatScheduler` from Task 3.
+- Produces: no API change. Notes committed to the audio clock are actively stopped and disconnected when the scheduler halts.
+
+**Why this is not already handled:** Task 3 terminates the worker on stop, which prevents *new* beats being scheduled. But beats already committed to the audio clock keep sounding — the audio hardware does not care that the worker is gone. They must be cancelled explicitly.
+
+- [ ] **Step 1: Add `disconnect` to the oscillator stub**
+
+`StubOscillator` has no `disconnect`, so the test below would fail on a missing method rather than on behaviour. In `src/test/audioStub.ts`, add it:
 
 ```ts
 export class StubOscillator {
@@ -858,29 +796,99 @@ export class StubOscillator {
 }
 ```
 
-- [ ] **Step 3: Run the tests to verify they pass**
+- [ ] **Step 2: Write the failing test**
+
+Append inside the `describe` block in `src/hook/useBeatScheduler.test.ts`:
+
+```ts
+  it('cancels beats already scheduled into the future when stopped', async () => {
+    const { rerender, onBeat } = await mount({ bpm: 60 })
+    const ctx = latestAudioContext()
+
+    act(() => {
+      ctx.currentTime = 1
+      latestWorker().tick()
+    })
+
+    const committed = ctx.oscillators.length
+    expect(committed).toBeGreaterThan(0)
+
+    rerender({ bpm: 60, pattern: 4, sound: true, running: false, onBeat })
+
+    // Every note the scheduler committed to must be actively cancelled --
+    // otherwise it still sounds after Stop.
+    ctx.oscillators.forEach((osc) => {
+      expect(osc.stop).toHaveBeenCalledWith()
+      expect(osc.disconnect).toHaveBeenCalled()
+    })
+  })
+```
+
+- [ ] **Step 3: Run the test to verify it fails**
+
+Run: `npx vitest run src/hook/useBeatScheduler.test.ts -t "cancels beats"`
+Expected: FAIL — `scheduleBeep` called `osc.stop(when + 0.1)` with an argument, but never with no arguments, and `disconnect` was never called.
+
+- [ ] **Step 4: Track and cancel committed notes**
+
+In `src/hook/useBeatScheduler.ts`, inside the `running` effect, add the tracking array next to the other loop state:
+
+```ts
+    let worker: Worker | null = null
+
+    const scheduled: OscillatorNode[] = []
+    let nextNoteTime = 0
+    let beat = 0
+```
+
+Capture each committed note in `scheduleAhead` — replace the muting block with:
+
+```ts
+        if (params.sound) {
+          const osc = scheduleBeep(nextNoteTime, accent)
+          if (osc) scheduled.push(osc)
+        }
+```
+
+Then cancel them in the cleanup, after the worker teardown:
+
+```ts
+      // Beats are committed ahead of now, so without this they keep sounding
+      // after the user hit Stop.
+      for (const osc of scheduled) {
+        try {
+          osc.stop()
+        } catch {
+          // Already stopped or never started; nothing to undo.
+        }
+        osc.disconnect()
+      }
+      scheduled.length = 0
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
 Expected: PASS, 10 tests.
 
-If "cancels beats already scheduled" fails, the cleanup in Task 3 is wrong — fix `useBeatScheduler.ts`, do not weaken the test.
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src/hook/useBeatScheduler.test.ts src/test/audioStub.ts
-git commit -m "test(scheduler): prove stop cancels beats committed to the future"
+git add src/hook/useBeatScheduler.ts src/hook/useBeatScheduler.test.ts src/test/audioStub.ts
+git commit -m "fix(scheduler): cancel committed beats when the metronome stops"
 ```
 
 ---
 
-### Task 5: Beat events reach the UI, and stale beats are dropped
+### Task 5: Deliver beats to the UI, dropping stale ones
 
 **Files:**
+- Modify: `src/hook/useBeatScheduler.ts`
 - Test: `src/hook/useBeatScheduler.test.ts`
 
 **Interfaces:**
-- Consumes: `useBeatScheduler` from Task 3. The rAF drain is implemented there; this task proves it.
+- Consumes: `useBeatScheduler` from Tasks 3–4.
+- Produces: `onBeat(beat, accent)` is now called, on an rAF loop, at the moment each beat's audio time arrives.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -936,18 +944,92 @@ Append inside the `describe` block:
   })
 ```
 
-- [ ] **Step 2: Run the tests**
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `npx vitest run src/hook/useBeatScheduler.test.ts -t "reports a beat"`
+Expected: FAIL — `onBeat` was never called; nothing delivers beats yet.
+
+- [ ] **Step 3: Add the queue and the drain loop**
+
+In `src/hook/useBeatScheduler.ts`, add the event type above `BeatSchedulerOptions`:
+
+```ts
+type BeatEvent = { time: number; beat: number; accent: boolean }
+```
+
+Inside the `running` effect, add the frame handle and queue to the loop state:
+
+```ts
+    let cancelled = false
+    let frame = 0
+    let worker: Worker | null = null
+
+    const queue: BeatEvent[] = []
+    const scheduled: OscillatorNode[] = []
+    let nextNoteTime = 0
+    let beat = 0
+```
+
+Queue every beat in `scheduleAhead`, immediately after the muting block and before `nextNoteTime` advances:
+
+```ts
+        queue.push({ time: nextNoteTime, beat, accent })
+```
+
+Add the drain loop after `scheduleAhead`:
+
+```ts
+    // Plain local function, not a useCallback: it schedules itself, and a
+    // useCallback cannot reference its own result (react-hooks/immutability).
+    const drain = () => {
+      const now = audioTime()
+      let due: BeatEvent | undefined
+
+      // Take only the most recent due beat. Returning from a hidden tab leaves
+      // a pile of elapsed beats queued, and firing them all would machine-gun
+      // the UI instead of resyncing.
+      while (queue.length > 0 && queue[0].time <= now) {
+        due = queue.shift()
+      }
+
+      if (due) paramsRef.current.onBeat(due.beat, due.accent)
+      frame = requestAnimationFrame(drain)
+    }
+```
+
+Start it at the end of `begin`, after the first `scheduleAhead()`:
+
+```ts
+      scheduleAhead()
+      frame = requestAnimationFrame(drain)
+```
+
+And stop it first in the cleanup:
+
+```ts
+      cancelled = true
+      if (frame) cancelAnimationFrame(frame)
+```
+
+Finally clear the queue alongside the scheduled notes:
+
+```ts
+      scheduled.length = 0
+      queue.length = 0
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npx vitest run src/hook/useBeatScheduler.test.ts`
-Expected: PASS, 13 tests. The drain from Task 3 already satisfies these.
+Expected: PASS, 13 tests.
 
-If "reports a beat" fails because rAF never runs under fake timers, confirm `vi.useFakeTimers()` is faking `requestAnimationFrame` — it is included in Vitest 4's default `toFake` set. Do not switch the drain to `setTimeout`.
+If the drain never runs, confirm `vi.useFakeTimers()` is faking `requestAnimationFrame` — it is in Vitest 4's default `toFake` set. Do not switch the drain to `setTimeout`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/hook/useBeatScheduler.test.ts
-git commit -m "test(scheduler): cover beat delivery and stale-beat dropping"
+git add src/hook/useBeatScheduler.ts src/hook/useBeatScheduler.test.ts
+git commit -m "feat(scheduler): deliver beats to the UI and drop stale ones"
 ```
 
 ---
@@ -1207,10 +1289,14 @@ Nothing to commit unless a defect was found. If all checks pass, record the veri
 
 ## Self-Review
 
-**Spec coverage:** Worker (Task 2), `scheduleBeep` at absolute time (Task 1), lookahead loop and beat phase (Task 3), private queue and rAF drain (Tasks 3, 5), `onBeat` to App (Task 7), stop cancels the future (Task 4), adaptive lookahead (Task 6), mute still queues events (Task 3), start resets phase to an accented downbeat (Tasks 3, 4), pattern change does not reset phase (Task 3 covers pattern length; phase continuity is inherent — the effect does not restart on pattern change), `workerStub.ts` mirroring `audioStub.ts` (Task 2), exact `n × 60/bpm` spacing (Task 3), worker build and precache risk (Task 8), `useTimer` retired (Task 7).
+**Spec coverage:** Worker (Task 2), `scheduleBeep` at absolute time (Task 1), lookahead loop and beat phase (Task 3), private queue and rAF drain (Task 5), `onBeat` to App (Task 7), stop cancels the future (Task 4), adaptive lookahead (Task 6), mute does not pause the beat (Task 3 proves no audio is scheduled; Task 5 proves beats are still delivered), start resets phase to an accented downbeat (Task 3), pattern change does not reset phase (Task 3 covers pattern length; phase continuity is inherent — the effect does not restart on pattern change), `workerStub.ts` mirroring `audioStub.ts` (Task 2), exact `n × 60/bpm` spacing (Task 3), worker build and precache risk (Task 8), `useTimer` retired (Task 7).
 
 **Placeholders:** none. Every code step carries complete code.
 
-**Type consistency:** `scheduleBeep(when, accent?)` returns `OscillatorNode | null` in Task 1 and is consumed as such in Task 3. `audioTime()` returns `number`. `onBeat(beat: number, accent: boolean)` matches between Task 3's type, Task 5's assertions, and Task 7's `useCallback`. `StubWorker.tick()` and `latestWorker()` from Task 2 are used in Tasks 3–6. `StubOscillator.disconnect` is added in Task 4 before Task 4's tests need it.
+**Type consistency:** `scheduleBeep(when, accent?)` returns `OscillatorNode | null` in Task 1; Task 3 calls it for its side effect and Task 4 starts consuming the return value. `audioTime()` returns `number`. `onBeat(beat: number, accent: boolean)` matches between Task 3's type, Task 5's assertions, and Task 7's `useCallback`. `StubWorker.tick()` and `latestWorker()` from Task 2 are used in Tasks 3–6. `StubOscillator.disconnect` is added in Task 4 Step 1, before the Task 4 test that needs it.
+
+**Test-count chain:** Task 3 leaves 9 scheduler tests, Task 4 makes 10, Task 5 makes 13, Task 6 makes 15. With useBeep 10, useVibrate 4 and App 8, the suite finishes at 37 once `useTimer`'s 12 retire in Task 7.
+
+**Every task has a real red phase.** Tasks 3, 4 and 5 were originally one implementation plus two test-only follow-ups, which meant Tasks 4 and 5 asserted against code that already existed — test-after, not TDD, and in conflict with the repo's red/green mandate. Task 3 now implements scheduling only; the cancellation path and the rAF drain each begin from a failing test in their own task. Do not collapse them back: an implementer who writes the drain during Task 3 destroys Task 5's red phase.
 
 **Known deviation, deliberate:** Task 7 Step 1 shows a ref written during render and Step 2 immediately corrects it. That is intentional — the violation is the single most likely mistake here, having already occurred once in this codebase, so the plan walks the implementer through it rather than silently presenting the fixed version.
