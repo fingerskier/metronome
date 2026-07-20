@@ -44,7 +44,18 @@ export default function useTimer(
         const delta = now - prevRef.current
 
         if (delta >= duration) {
-          prevRef.current = now
+          // Carry the overshoot forward rather than resetting to `now`. A beat
+          // can only land on a frame boundary, so `now` is always 0-16ms late;
+          // discarding that every beat is what made the tempo run slow.
+          prevRef.current += duration
+
+          if (now - prevRef.current >= duration) {
+            // Still a whole beat behind: the loop was stalled, not merely late
+            // (a backgrounded tab throttles or pauses rAF). Drop the missed
+            // beats and resync, instead of machine-gunning to catch up.
+            prevRef.current = now
+          }
+
           callbackRef.current(delta)
         }
       }
