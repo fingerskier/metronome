@@ -471,4 +471,65 @@ describe('useBeatScheduler', () => {
 
     expect(latestAudioContext().oscillators.length).toBeLessThanOrEqual(2)
   })
+
+  it('widens the lookahead from a live visibilitychange event, not just at mount', async () => {
+    // The two tests above only ever exercise sync()'s mount-time call: they
+    // mock document.hidden BEFORE mounting, so the horizon is already right
+    // by the time anything is scheduled, and the dispatchEvent in each proves
+    // nothing (hidden doesn't change, so sync() is a no-op both times it
+    // runs). This test mounts VISIBLE, drives real scheduling passes, and
+    // only THEN flips hidden and dispatches -- so the widened horizon can
+    // only be explained by the addEventListener('visibilitychange', sync)
+    // registration actually firing sync() again.
+    const { onBeat } = await mount({ bpm: 120 })
+    const ctx = latestAudioContext()
+    expect(onBeat).not.toHaveBeenCalled()
+
+    // bpm 120 -> secondsPerBeat = 60/120 = 0.5s exactly.
+    // Mount already ran one scheduling pass: nextNoteTime = audioTime()(0) +
+    // START_OFFSET(0.05) = 0.05; horizon = 0 + LOOKAHEAD_VISIBLE(0.1) = 0.1;
+    // 0.05 < 0.1 commits one note and advances nextNoteTime to 0.55.
+    expect(ctx.oscillators).toHaveLength(1)
+
+    act(() => {
+      ctx.currentTime = 0.5
+      latestWorker().tick()
+    })
+    // horizon = 0.5 + 0.1 = 0.6; nextNoteTime(0.55) < 0.6 commits and
+    // advances to 1.05.
+
+    act(() => {
+      ctx.currentTime = 1.0
+      latestWorker().tick()
+    })
+    // horizon = 1.0 + 0.1 = 1.1; nextNoteTime(1.05) < 1.1 commits and
+    // advances to 1.55. Three notes committed so far under the visible
+    // lookahead, one per pass -- this is the "small number" the 0.1s horizon
+    // can ever expose at this tick spacing.
+    const visibleCount = ctx.oscillators.length
+    expect(visibleCount).toBe(3)
+
+    // Only NOW does hidden change, live, while the scheduler is running.
+    const hidden = vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    // Drive one more pass at the SAME audio time (currentTime still 1.0) --
+    // isolating the widened horizon to the event, not to clock advancement.
+    // Had the listener not fired, lookaheadRef would still hold
+    // LOOKAHEAD_VISIBLE, so horizon would still be 1.0 + 0.1 = 1.1 -- already
+    // behind nextNoteTime (1.55), so the while-loop's condition would be
+    // false on entry and this pass would commit ZERO new oscillators.
+    // Because the listener honors the event, lookaheadRef becomes
+    // LOOKAHEAD_HIDDEN(2), so horizon = 1.0 + 2 = 3.0, and three more notes
+    // fall inside [1.55, 3.0): 1.55, 2.05, 2.55 (each 0.5s apart; the next,
+    // 3.05, misses the horizon).
+    act(() => {
+      latestWorker().tick()
+    })
+
+    expect(ctx.oscillators.length).toBe(visibleCount + 3)
+    hidden.mockRestore()
+  })
 })
