@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useRef } from 'react'
 
+/** How long a single click rings, in seconds. */
+const NOTE_LENGTH = 0.1
+
 /**
- * Returns a function that plays a short beep. When `accent` is true a louder
- * beep with a higher frequency is produced.
+ * Tone synthesis for the metronome click. Knows nothing about tempo or beats --
+ * callers say exactly when, on the AudioContext clock, each note should sound.
  */
 export default function useBeep() {
   const contextRef = useRef<AudioContext | null>(null)
@@ -30,11 +33,19 @@ export default function useBeep() {
     }
   }, [])
 
-  const beep = useCallback((accent = false) => {
+  /** The audio hardware clock. The scheduler's only source of truth for time. */
+  const audioTime = useCallback(() => contextRef.current?.currentTime ?? 0, [])
+
+  /**
+   * Schedules one click to sound at `when` (absolute AudioContext time).
+   * Returns the oscillator so a caller can cancel a note it has committed to
+   * but no longer wants -- see the scheduler's stop path.
+   */
+  const scheduleBeep = useCallback((when: number, accent = false) => {
     const ctx = contextRef.current
     const gain = gainRef.current
     if (!ctx || !gain) {
-      return
+      return null
     }
     const osc = ctx.createOscillator()
     const g = ctx.createGain()
@@ -43,10 +54,13 @@ export default function useBeep() {
     g.gain.value = accent ? 1 : 0.5
     osc.connect(g)
     g.connect(gain)
-    osc.start()
-    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.1)
-    osc.stop(ctx.currentTime + 0.1)
+    osc.start(when)
+    // Ramp relative to this note's own start, not to ctx.currentTime -- the
+    // note may be scheduled well into the future.
+    g.gain.exponentialRampToValueAtTime(0.0001, when + NOTE_LENGTH)
+    osc.stop(when + NOTE_LENGTH)
+    return osc
   }, [])
 
-  return { beep, resumeAudio }
+  return { scheduleBeep, resumeAudio, audioTime }
 }

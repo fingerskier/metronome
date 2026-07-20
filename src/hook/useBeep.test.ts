@@ -4,47 +4,82 @@ import useBeep from './useBeep'
 import { latestAudioContext } from '../test/audioStub'
 
 describe('useBeep', () => {
+  it('starts and stops the note at the requested audio time', () => {
+    const { result } = renderHook(() => useBeep())
+
+    act(() => {
+      result.current.scheduleBeep(1.25, false)
+    })
+
+    const osc = latestAudioContext().oscillators.at(-1)!
+    expect(osc.start).toHaveBeenCalledWith(1.25)
+    expect(osc.stop).toHaveBeenCalledWith(1.25 + 0.1)
+  })
+
   it('plays a 440Hz sine at half gain on an offbeat', () => {
     const { result } = renderHook(() => useBeep())
 
-    act(() => result.current.beep(false))
+    act(() => {
+      result.current.scheduleBeep(0.5, false)
+    })
 
     const ctx = latestAudioContext()
     const osc = ctx.oscillators.at(-1)!
     expect(osc.type).toBe('sine')
     expect(osc.frequency.value).toBe(440)
-    expect(osc.start).toHaveBeenCalled()
-    // The master gain is built at mount, so the note's own gain is the newest.
     expect(ctx.gains.at(-1)!.gain.value).toBe(0.5)
   })
 
   it('accents an octave up at full gain', () => {
     const { result } = renderHook(() => useBeep())
 
-    act(() => result.current.beep(true))
+    act(() => {
+      result.current.scheduleBeep(0.5, true)
+    })
 
     const ctx = latestAudioContext()
     expect(ctx.oscillators.at(-1)!.frequency.value).toBe(880)
     expect(ctx.gains.at(-1)!.gain.value).toBe(1)
   })
 
-  it('ramps each note down and stops it so notes do not overlap', () => {
-    const { result } = renderHook(() => useBeep())
-
-    act(() => result.current.beep())
-
-    const ctx = latestAudioContext()
-    expect(ctx.gains.at(-1)!.gain.exponentialRampToValueAtTime).toHaveBeenCalled()
-    expect(ctx.oscillators.at(-1)!.stop).toHaveBeenCalled()
-  })
-
-  it('builds one oscillator per beat', () => {
+  it('ramps the note down relative to its own start time', () => {
     const { result } = renderHook(() => useBeep())
 
     act(() => {
-      result.current.beep(true)
-      result.current.beep(false)
-      result.current.beep(false)
+      result.current.scheduleBeep(2, false)
+    })
+
+    const ctx = latestAudioContext()
+    expect(
+      ctx.gains.at(-1)!.gain.exponentialRampToValueAtTime,
+    ).toHaveBeenCalledWith(0.0001, 2.1)
+  })
+
+  it('returns the oscillator so the caller can cancel it', () => {
+    const { result } = renderHook(() => useBeep())
+
+    let returned: unknown
+    act(() => {
+      returned = result.current.scheduleBeep(0.5, false)
+    })
+
+    expect(returned).toBe(latestAudioContext().oscillators.at(-1))
+  })
+
+  it('reports the current audio clock time', () => {
+    const { result } = renderHook(() => useBeep())
+    latestAudioContext().currentTime = 3.5
+
+    expect(result.current.audioTime()).toBe(3.5)
+  })
+
+  it('builds one oscillator per scheduled beat', () => {
+    const { result } = renderHook(() => useBeep())
+
+    act(() => {
+      result.current.scheduleBeep(0.1, true)
+      result.current.scheduleBeep(0.6, false)
+      result.current.scheduleBeep(1.1, false)
     })
 
     expect(latestAudioContext().oscillators).toHaveLength(3)
