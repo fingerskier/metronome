@@ -100,7 +100,31 @@ export default function useBeatScheduler({
         Number.isFinite(flooredPattern) && flooredPattern > 0
           ? flooredPattern
           : 4
-      const horizon = audioTime() + lookaheadRef.current
+      const now = audioTime()
+
+      // A long stall (system sleep, or a hidden page throttled past what the
+      // lookahead covers) leaves nextNoteTime far in the past. The threshold
+      // is pinned to the widest configured lookahead, not the current
+      // (possibly much narrower, e.g. 0.1s while visible) one -- otherwise an
+      // ordinary multi-beat catch-up burst, or plain tick jitter, gets
+      // mistaken for a stall and drops a beat that was never actually missed.
+      // A real stall (tens of seconds to minutes) still clears this by a wide
+      // margin. Without this resync, recovery would otherwise commit every
+      // missed beat at once.
+      if (nextNoteTime < now - LOOKAHEAD_HIDDEN) {
+        nextNoteTime = now + START_OFFSET
+      }
+
+      const horizon = now + lookaheadRef.current
+
+      // drain() prunes these too, but rAF is parked while the tab is hidden --
+      // exactly when scheduleAhead keeps running. Without pruning here, both
+      // arrays grow for the whole hidden stretch and nothing is collectable.
+      // Keep the last entry in each so drain can still report the last due
+      // beat, and so a note isn't dropped from the cancel-on-stop list before
+      // this same pass has committed its replacement.
+      while (queue.length > 1 && queue[1].time <= now) queue.shift()
+      while (scheduled.length > 1 && scheduled[0].endsAt <= now) scheduled.shift()
 
       // The count is a backstop, not a policy: clamping bpm already bounds the
       // beats per pass. It exists so no future input can reintroduce a hang.
@@ -154,7 +178,12 @@ export default function useBeatScheduler({
       try {
         await resumeAudio()
       } catch {
-        // A blocked context should not stop the visual metronome.
+        // The audio clock is the ONLY clock here: a suspended AudioContext
+        // freezes currentTime, so audioTime() returns a constant, scheduleAhead
+        // commits one horizon and never advances, and drain's due-check never
+        // fires -- the whole metronome (audio, blip, vibration) sits idle, not
+        // just the sound. In practice this doesn't bite: `running` flips true
+        // from a user gesture, so resume() succeeds.
       }
       if (cancelled) return
 
@@ -167,6 +196,9 @@ export default function useBeatScheduler({
       )
       worker.onmessage = () => {
         scheduleAhead()
+      }
+      worker.onerror = (event) => {
+        console.error('scheduler worker failed to start or crashed:', event)
       }
       worker.postMessage({ type: 'start', interval: TICK_MS })
 
@@ -190,15 +222,14 @@ export default function useBeatScheduler({
       for (const { osc } of scheduled) {
         try {
           osc.stop()
+          osc.disconnect()
         } catch {
-          // Already stopped or never started; nothing to undo.
+          // Already stopped/disconnected, or the context closed first (useBeep
+          // tears down before this cleanup runs); nothing to undo.
         }
-        osc.disconnect()
       }
       scheduled.length = 0
       queue.length = 0
     }
   }, [running, audioTime, scheduleBeep, resumeAudio])
-
-  return { resumeAudio }
 }

@@ -1,7 +1,7 @@
 # Web Audio lookahead scheduler
 
 **Date:** 2026-07-20
-**Status:** approved, not yet implemented
+**Status:** implemented
 **Fixes:** the remaining half of the tempo-accuracy issue — per-beat audio jitter and background-tab stalling
 
 ## Problem

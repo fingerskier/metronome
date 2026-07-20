@@ -1,10 +1,23 @@
-import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { act, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { latestAudioContext } from './test/audioStub'
+import { latestWorker } from './test/workerStub'
 
 beforeEach(() => {
   localStorage.clear()
 })
+
+/** jsdom has no Vibration API by default; installs a spy and removes it. */
+function stubVibrate() {
+  const vibrate = vi.fn()
+  Object.defineProperty(navigator, 'vibrate', {
+    value: vibrate,
+    configurable: true,
+    writable: true,
+  })
+  return vibrate
+}
 
 describe('App', () => {
   it('starts at 120bpm in 4/4', () => {
@@ -75,5 +88,67 @@ describe('App', () => {
     fireEvent.click(transport)
 
     expect(screen.getByRole('button', { name: 'Stop' })).toBe(transport)
+  })
+
+  describe('onBeat wiring', () => {
+    // Real ticks are needed here -- driving a beat means advancing the
+    // scheduler's audio clock and letting its rAF drain fire, same as
+    // useBeatScheduler.test.ts. Scoped to this describe so the other tests
+    // above, which never touch the clock, are unaffected.
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('drives the blip and vibration from onBeat, honoring a vibration toggle on the next beat', async () => {
+      // Regression guard for App's vibeRef indirection: onBeat is a stable
+      // useCallback that does not close over `vibe` directly (only over
+      // `vibrate`), so a vibration toggle must take effect starting with the
+      // very next beat -- not be stuck at whatever `vibe` was when onBeat (or
+      // the scheduler's effect) was first created.
+      const vibrate = stubVibrate()
+      render(<App />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Start' }))
+      // begin() awaits resumeAudio() before committing anything; an async
+      // act() is required to flush that microtask before anything is
+      // scheduled. See useBeatScheduler.test.ts's mount() helper.
+      await act(async () => {})
+
+      const ctx = latestAudioContext()
+      const worker = latestWorker()
+
+      // The first beat (an accented downbeat, per useBeatScheduler's
+      // contract) was already committed synchronously inside begin(). Move
+      // the audio clock past it and let the drain rAF notice.
+      act(() => {
+        ctx.currentTime = 0.1
+        vi.advanceTimersByTime(20)
+      })
+
+      expect(screen.getByText('🟢')).toBeDefined()
+      expect(vibrate).not.toHaveBeenCalled()
+
+      // Toggle vibration on WHILE running -- this is the moment a stale
+      // closure would fail to take effect.
+      fireEvent.click(screen.getByLabelText(/vibration/i))
+
+      // Commit and report the next beat: 120bpm default -> 0.5s spacing, an
+      // unaccented offbeat.
+      act(() => {
+        ctx.currentTime = 0.5
+        worker.tick()
+      })
+      act(() => {
+        ctx.currentTime = 0.6
+        vi.advanceTimersByTime(20)
+      })
+
+      expect(screen.getByText('⚪')).toBeDefined()
+      expect(vibrate).toHaveBeenCalledWith(20)
+    })
   })
 })
