@@ -333,4 +333,26 @@ describe('useBeatScheduler', () => {
     const firstAfterRestart = ctx.oscillators[beforeRestart]
     expect(firstAfterRestart.frequency.value).toBe(880)
   })
+
+  it('cancels beats already scheduled into the future when stopped', async () => {
+    const { rerender, onBeat } = await mount({ bpm: 60 })
+    const ctx = latestAudioContext()
+
+    act(() => {
+      ctx.currentTime = 1
+      latestWorker().tick()
+    })
+
+    const committed = ctx.oscillators.length
+    expect(committed).toBeGreaterThan(0)
+
+    rerender({ bpm: 60, pattern: 4, sound: true, running: false, onBeat })
+
+    // Every note the scheduler committed to must be actively cancelled --
+    // otherwise it still sounds after Stop.
+    ctx.oscillators.forEach((osc) => {
+      expect(osc.stop).toHaveBeenCalledWith()
+      expect(osc.disconnect).toHaveBeenCalled()
+    })
+  })
 })

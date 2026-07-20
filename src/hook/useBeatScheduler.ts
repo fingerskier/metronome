@@ -52,6 +52,7 @@ export default function useBeatScheduler({
     let cancelled = false
     let worker: Worker | null = null
 
+    const scheduled: OscillatorNode[] = []
     let nextNoteTime = 0
     let beat = 0
 
@@ -86,7 +87,8 @@ export default function useBeatScheduler({
         // Muting silences the click but must not pause the beat -- the blip and
         // vibration keep working.
         if (params.sound) {
-          scheduleBeep(nextNoteTime, accent)
+          const osc = scheduleBeep(nextNoteTime, accent)
+          if (osc) scheduled.push(osc)
         }
 
         nextNoteTime += secondsPerBeat
@@ -130,6 +132,18 @@ export default function useBeatScheduler({
         worker.postMessage({ type: 'stop' })
         worker.terminate()
       }
+
+      // Beats are committed ahead of now, so without this they keep sounding
+      // after the user hit Stop.
+      for (const osc of scheduled) {
+        try {
+          osc.stop()
+        } catch {
+          // Already stopped or never started; nothing to undo.
+        }
+        osc.disconnect()
+      }
+      scheduled.length = 0
     }
   }, [running, audioTime, scheduleBeep, resumeAudio])
 

@@ -14,6 +14,7 @@ export class StubOscillator {
   type = ''
   frequency = new StubAudioParam()
   connect = vi.fn()
+  disconnect = vi.fn()
   start = vi.fn()
   stop = vi.fn()
 }
