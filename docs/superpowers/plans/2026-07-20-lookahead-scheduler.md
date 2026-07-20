@@ -947,6 +947,39 @@ Append inside the `describe` block:
     expect(onBeat).not.toHaveBeenCalled()
   })
 
+  it('releases notes that have finished sounding', async () => {
+    // Guards against the committed-notes array growing for the whole run.
+    // The array is private, but pruning is observable: a note already
+    // finished must NOT be re-cancelled on stop, while a pending one must be.
+    const { rerender, onBeat } = await mount({ bpm: 240, pattern: 4 })
+    const ctx = latestAudioContext()
+
+    act(() => {
+      ctx.currentTime = 0.5
+      latestWorker().tick()
+    })
+
+    const early = ctx.oscillators[0]
+    expect(early).toBeDefined()
+
+    // Advance past the first note's end and run a frame so the drain prunes.
+    act(() => {
+      ctx.currentTime = 5
+      vi.advanceTimersByTime(20)
+    })
+
+    // Commit a fresh note that is still in the future, then stop.
+    act(() => {
+      latestWorker().tick()
+    })
+    const pending = ctx.oscillators[ctx.oscillators.length - 1]
+
+    rerender({ bpm: 240, pattern: 4, sound: true, running: false, onBeat })
+
+    expect(early.stop).not.toHaveBeenCalledWith()
+    expect(pending.stop).toHaveBeenCalledWith()
+  })
+
   it('drops stale beats instead of firing a burst after a hidden stretch', async () => {
     const { onBeat } = await mount({ bpm: 240, pattern: 4 })
     const ctx = latestAudioContext()
@@ -1000,6 +1033,40 @@ Queue every beat in `scheduleAhead`, immediately after the muting block and befo
         queue.push({ time: nextNoteTime, beat, accent })
 ```
 
+While you are here, fix a leak Task 4 left behind. `scheduled` is only ever appended to and is cleared solely in the effect cleanup, so a continuously-playing metronome retains every oscillator it has ever committed -- roughly 7,200 dead references per hour at 120bpm. The drain already walks the timeline, so it is the natural place to prune.
+
+Change the tracking array to carry each note's end time. In `useBeep.ts`, export the note length so the scheduler does not duplicate the constant:
+
+```ts
+/** How long a single click rings, in seconds. */
+export const NOTE_LENGTH = 0.1
+```
+
+In `useBeatScheduler.ts`, import it alongside the hook and change the array's element type:
+
+```ts
+import useBeep, { NOTE_LENGTH } from '@/hook/useBeep'
+```
+
+```ts
+    const scheduled: { osc: OscillatorNode; endsAt: number }[] = []
+```
+
+Push the end time with each note:
+
+```ts
+        if (params.sound) {
+          const osc = scheduleBeep(nextNoteTime, accent)
+          if (osc) scheduled.push({ osc, endsAt: nextNoteTime + NOTE_LENGTH })
+        }
+```
+
+And in the cleanup, unwrap before cancelling:
+
+```ts
+      for (const { osc } of scheduled) {
+```
+
 Add the drain loop after `scheduleAhead`:
 
 ```ts
@@ -1017,6 +1084,13 @@ Add the drain loop after `scheduleAhead`:
       }
 
       if (due) paramsRef.current.onBeat(due.beat, due.accent)
+
+      // Release notes that have finished sounding. Without this the array
+      // grows for the whole run and nothing can be collected until Stop.
+      while (scheduled.length > 0 && scheduled[0].endsAt <= now) {
+        scheduled.shift()
+      }
+
       frame = requestAnimationFrame(drain)
     }
 ```
