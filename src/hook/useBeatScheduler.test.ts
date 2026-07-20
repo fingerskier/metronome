@@ -196,6 +196,34 @@ describe('useBeatScheduler', () => {
     })
   })
 
+  it('recovers a coherent accent cycle when pattern floors to zero', async () => {
+    // The guard must floor BEFORE checking positivity. Math.floor(0.5) is 0,
+    // and (beat + 1) % 0 is NaN. `beat` is a closure variable that persists
+    // across scheduleAhead calls (it is never reset by ticks), so a single
+    // NaN permanently kills the accent -- beat === 0 never holds again for
+    // the life of the effect, instead of falling back to the default
+    // pattern like other invalid inputs do.
+    await mount({ bpm: 240, pattern: 0.5 })
+    const ctx = latestAudioContext()
+
+    for (let i = 1; i <= 12; i++) {
+      act(() => {
+        ctx.currentTime = i * 0.25
+        latestWorker().tick()
+      })
+    }
+
+    // A pattern that floors to zero must fall back to the same default
+    // pattern (4) used elsewhere in this file, not corrupt the accent cycle
+    // with NaN. If it corrupted, every beat after the first would read as
+    // an offbeat (440Hz) forever instead of recurring every 4th beat.
+    const freqs = ctx.oscillators.map((osc) => osc.frequency.value)
+    expect(freqs.length).toBeGreaterThanOrEqual(8)
+    freqs.slice(0, 8).forEach((f, i) => {
+      expect(f).toBe(i % 4 === 0 ? 880 : 440)
+    })
+  })
+
   it('schedules no audio when sound is muted', async () => {
     await mount({ sound: false })
     const ctx = latestAudioContext()
