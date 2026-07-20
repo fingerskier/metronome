@@ -711,9 +711,13 @@ export default function useBeatScheduler({
           ? Math.min(params.bpm, MAX_BPM)
           : 120
       const secondsPerBeat = 60 / bpm
+      // Floor BEFORE the positivity check, not after: Math.floor(0.5) is 0,
+      // and `% 0` is NaN. beat persists across calls, so a single NaN would
+      // permanently kill the accent -- beat === 0 never again holds.
+      const flooredPattern = Math.floor(params.pattern)
       const pattern =
-        Number.isFinite(params.pattern) && params.pattern > 0
-          ? Math.floor(params.pattern)
+        Number.isFinite(flooredPattern) && flooredPattern > 0
+          ? flooredPattern
           : 4
       const horizon = audioTime() + lookaheadRef.current
 
